@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.nox/
+.eggs/
+*.egg-info/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.suo
+
+# Secrets
+.env
+*.env.local
+secrets.py
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# User-specific directories
+/Users/
+/PhotoMagic/

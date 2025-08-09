@@ -1,0 +1,6 @@
+customtkinter
+Pillow
+openai
+python-dotenv
+colour-science
+numpy
