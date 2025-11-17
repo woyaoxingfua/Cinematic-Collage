@@ -1,6 +1,4 @@
-# AI电影感拼图工具 (AI Cinematic Collage Tool)
-
-[English](./README_EN.md) | 简体中文
+# AI电影感拼图工具 (AI Cinematic Collage 
 
 一个桌面应用程序，它结合了多种照片布局、电影感滤镜和AI赋文功能，能将您的普通照片一键转化为富有故事性和艺术感的电影风格图片。
 
@@ -8,7 +6,7 @@
 
 ---
 
-## 原始需求回顾 (Initial Requirements)
+## 项目起源
 
 本项目源于一个清晰而富有创意的初始构想。以下是最初设定的核心功能要求，也是我们整个开发过程遵循的蓝图：
 
@@ -81,7 +79,7 @@ pip install -r requirements.txt
     OPENAI_API_KEY="您的API密钥"
     OPENAI_API_BASE="您的API服务器地址"
     ```
-    > **安全提示:** `.gitignore` 文件已配置为忽略 `.env` 文件，确保您的密钥不会被上传到Git仓库。
+
 
 ### 5. 运行程序 (Run the Application)
 一切准备就绪后，在终端中运行以下命令即可启动程序：
