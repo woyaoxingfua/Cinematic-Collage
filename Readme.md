@@ -1,6 +1,39 @@
-# AI电影感拼图工具 (AI Cinematic Collage 
+# 🎬 AI电影感拼图工具 (AI Cinematic Collage)
 
-一个桌面应用程序，它结合了多种照片布局、电影感滤镜和AI赋文功能，能将您的普通照片一键转化为富有故事性和艺术感的电影风格图片。
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white" alt="Python Version">
+  <img src="https://img.shields.io/badge/GUI-customtkinter-informational?logo=python" alt="GUI Framework">
+  <img src="https://img.shields.io/badge/AI-OpenAI%20Compatible-green?logo=openai" alt="AI Integration">
+  <img src="https://img.shields.io/badge/Image-Pillow%20%7C%20NumPy-orange?logo=numpy" alt="Image Processing">
+  <img src="https://img.shields.io/badge/Color-LUT%20Grading-purple" alt="LUT Color Grading">
+</p>
+
+---
+
+## 📖 关于本项目 (About)
+
+**AI电影感拼图工具**是一款功能完备的桌面应用程序，专为热爱摄影和视觉艺术的创作者设计。它将**多布局图像合成**、**专业级LUT调色**与**AI智能文字生成**融为一体，只需几次点击，就能将您的普通照片变成充满故事感与电影氛围的艺术作品。
+
+**AI Cinematic Collage** is a full-featured desktop application designed for photography enthusiasts and visual artists. It combines **multi-layout image composition**, **professional LUT color grading**, and **AI-powered caption generation** into a seamless workflow — transforming your everyday photos into cinematic, story-rich artworks in just a few clicks.
+
+### 核心工作流程 (Core Workflow)
+
+```
+选择照片  →  选择布局  →  应用滤镜  →  AI生成文案  →  添加文字  →  导出保存
+Select Photos → Choose Layout → Apply Filter → AI Caption → Add Text → Export
+```
+
+### 技术栈 (Tech Stack)
+
+| 模块 | 技术 |
+|------|------|
+| 图形界面 | `customtkinter` — 现代暗色主题 GUI |
+| 图像处理 | `Pillow (PIL)` + `NumPy` — 布局合成与文字渲染 |
+| 专业调色 | `colour-science` — `.cube` LUT 滤镜引擎 |
+| AI 集成 | `openai` — 兼容任意 OpenAI 格式的视觉 AI 接口 |
+| 配置管理 | `python-dotenv` — 安全管理 API 密钥 |
+
+---
 
 ![应用最终截图](img.png)
 
