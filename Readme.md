@@ -1,4 +1,4 @@
-# AI电影感拼图工具 (AI Cinematic Collage 
+# AI电影感拼图工具 (AI Cinematic Collage )
 
 一个桌面应用程序，它结合了多种照片布局、电影感滤镜和AI赋文功能，能将您的普通照片一键转化为富有故事性和艺术感的电影风格图片。
 
