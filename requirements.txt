@@ -1,6 +1,5 @@
-customtkinter
-Pillow
-openai
-python-dotenv
-colour-science
-numpy
+customtkinter>=5.2
+Pillow>=10.1
+openai>=1.30
+python-dotenv>=1.0
+numpy>=1.24

@@ -130,3 +130,17 @@
 - AI 失败时选择「出图 + 空文案 + 警告」而不是整体失败：用户仍能拿到拼图并可手动补字（输入框就在手边），「重新生成文字」可重试
 - 布局切换后旧结果保留：换布局再点「重新渲染」可复用照片与文案；若数量不匹配会得到明确报错（如 3 张选单张海报）
 - settings 里 `ai_enabled` 在未配置 .env 时强制存 True，避免配置好 .env 后用户误以为开关坏了
+
+---
+
+## 阶段 5：收尾 —— 完成
+
+- [x] `Readme.md` 重写：真实安装步骤（luts/fonts 已在仓库，不用手动建）、V3 新功能清单、**正确的项目结构**（此前列的是不存在的 `PhotoMagic/` 嵌套目录）、实测 Python 3.12、开发与测试一节（pytest / --smoke-test / make_samples / ui_selftest）
+- [x] `.env.example` 补可选键 `OPENAI_MODEL` / `AI_TIMEOUT` / `AI_MAX_TOKENS`，注明「模型必须是支持图片输入的视觉模型」
+- [x] `requirements.txt` 写最低版本，**移除 colour-science**（阶段 2 对拍已达标，filters.py 已纯 numpy）；对拍测试保留 `importorskip`，装了 colour 的环境仍可跑
+- [x] `build_exe.md` 新建：PyInstaller onedir 命令（`--collect-all customtkinter` + fonts/luts add-data），标注**未验证**；说明为何不推荐 onefile（临时目录导致 settings.json/app.log 丢失）；分发前字体授权提醒
+
+### 验收结果
+- `pytest`：74 passed
+- `python main.py --smoke-test` 退出码 0
+- 移除 colour 后 `import filters` 正常工作
