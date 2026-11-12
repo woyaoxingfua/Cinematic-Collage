@@ -81,6 +81,10 @@ def main():
     r = layouts.get("四宫格").render(photos4, TEXTS_3 + ["第四张的独白"], family, scale=2.0)
     save(r.image, "grid4_2x.png")
 
+    # 电影字幕样式
+    r = strip.render(photos3, TEXTS_3, family, scale=2.0, style="保留间隙", text_style="电影字幕")
+    save(r.image, "film_strip_subtitle_2x.png")
+
     # 单张海报（长文案 / 短文案 / 空文案）
     r = poster.render([make_photo(1200, 900, 5)], [TEXT_LONG], family, scale=2.0)
     save(r.image, "poster_long_text_2x.png")

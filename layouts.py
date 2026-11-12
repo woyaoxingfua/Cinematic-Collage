@@ -4,12 +4,14 @@
 - 所有布局实现 Layout 接口并注册到 LAYOUTS 注册表，新增布局只需注册即可被 UI 使用
 - 所有尺寸都是「基准值 × scale」，不再跨文件手抄魔法数字
 - render() 返回 RenderResult（成图 + 每张照片的 Slot），文字通过 slots 定位
+- 文字样式：经典底部（白字黑描边贴照片下缘）/ 电影字幕（底部渐变遮罩 + 居中白字）
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 import imaging
@@ -122,6 +124,64 @@ def _draw_caption_bottom(draw, slot: Slot, text, font, pad, tmax, tmin, tmax_h) 
     )
 
 
+# 文字样式名（UI 选项、settings 与布局共用）
+TEXT_STYLE_CLASSIC = "经典底部"
+TEXT_STYLE_SUBTITLE = "电影字幕"
+TEXT_STYLES = (TEXT_STYLE_CLASSIC, TEXT_STYLE_SUBTITLE)
+
+
+def _make_gradient(w, h, max_alpha=170) -> Image.Image:
+    """黑色竖向渐变条（RGBA）：顶部全透明 → 底部 max_alpha，作电影字幕遮罩。"""
+    arr = np.zeros((h, w, 4), dtype=np.uint8)
+    ramp = np.linspace(0, max_alpha, h).astype(np.uint8)
+    arr[..., 3] = ramp[:, None]
+    return Image.fromarray(arr)  # 4 通道 uint8 自动按 RGBA 处理（mode 参数已弃用）
+
+
+def _draw_subtitle(canvas, slot: Slot, text, font, pad, tmax, tmin, tmax_h) -> None:
+    """电影字幕样式：照片底部铺渐变遮罩，文字居中、白字黑描边。"""
+    text = (text or "").strip()
+    if not text:
+        return
+    box_w = slot.w - pad * 2
+    box_h = min(tmax_h, slot.h - pad * 2)
+    if box_w <= tmin or box_h < tmin:
+        return
+    lines, size = textdraw.fit_text(text, box_w, box_h, tmax, tmin, font)
+    if not lines:
+        return
+    f = font.at(size)
+    line_h = font.measure_line_height(f)
+    block_h = len(lines) * line_h
+    # 遮罩高度恰好包住文字块 + 上下留白
+    gh = min(slot.h, int(round(block_h)) + pad * 2)
+    strip = _make_gradient(slot.w, gh)
+    canvas.paste(strip, (slot.x, slot.bottom - gh), strip)
+    draw = ImageDraw.Draw(canvas)
+    y0 = slot.bottom - gh + (gh - block_h) / 2
+    textdraw.draw_lines(
+        draw,
+        lines,
+        slot.x + pad,
+        y0,
+        f,
+        (255, 255, 255),
+        line_h=line_h,
+        align="center",
+        max_width=box_w,
+        stroke_width=max(1, size // 12),
+        stroke_fill=(0, 0, 0),
+    )
+
+
+def _draw_caption_by_style(canvas, slot: Slot, text, font, pad, tmax, tmin, tmax_h, text_style) -> None:
+    """按文字样式分发绘制。"""
+    if text_style == TEXT_STYLE_SUBTITLE:
+        _draw_subtitle(canvas, slot, text, font, pad, tmax, tmin, tmax_h)
+    else:
+        _draw_caption_bottom(ImageDraw.Draw(canvas), slot, text, font, pad, tmax, tmin, tmax_h)
+
+
 # ===================================================================
 # 电影竖排
 # ===================================================================
@@ -148,7 +208,7 @@ class FilmStripLayout(Layout):
     def photo_width(self, scale) -> int:
         return _s(self.PHOTO_W, scale)
 
-    def render(self, photos, texts, font, scale=1.0, style="保留间隙", **_) -> RenderResult:
+    def render(self, photos, texts, font, scale=1.0, style="保留间隙", text_style=TEXT_STYLE_CLASSIC, **_) -> RenderResult:
         self.check_count(len(photos))
         n = len(photos)
         texts = list(texts or [])
@@ -166,7 +226,6 @@ class FilmStripLayout(Layout):
         total_w = sw * 2 + pw
 
         canvas = Image.new("RGB", (total_w, total_h), self.CANVAS_BG)
-        draw = ImageDraw.Draw(canvas)
         slots = []
         pad = _s(self.TEXT_PAD, scale)
         tmax, tmin = _s(self.TEXT_SIZE, scale), _s(self.TEXT_MIN, scale)
@@ -177,10 +236,11 @@ class FilmStripLayout(Layout):
             canvas.paste(im, (sw, y))
             slot = Slot(sw, y, pw, im.height)
             slots.append(slot)
-            _draw_caption_bottom(draw, slot, texts[i], font, pad, tmax, tmin, tmax_h)
+            _draw_caption_by_style(canvas, slot, texts[i], font, pad, tmax, tmin, tmax_h, text_style)
             y += im.height + gap
 
         # 两侧齿孔
+        draw = ImageDraw.Draw(canvas)
         yy = hole_spacing // 2
         while yy + hole <= total_h:
             draw.rectangle([hole_margin, yy, hole_margin + hole, yy + hole], fill=self.HOLE_COLOR)
@@ -215,7 +275,7 @@ class Grid4Layout(Layout):
     def photo_width(self, scale) -> int:
         return _s(self.CELL_W, scale)
 
-    def render(self, photos, texts, font, scale=1.0, **_) -> RenderResult:
+    def render(self, photos, texts, font, scale=1.0, text_style=TEXT_STYLE_CLASSIC, **_) -> RenderResult:
         self.check_count(len(photos))
         texts = (list(texts or []) + [""] * 4)[:4]
         cw, ch = _s(self.CELL_W, scale), _s(self.CELL_H, scale)
@@ -226,7 +286,6 @@ class Grid4Layout(Layout):
             (margin * 2 + cw * 2 + gap, margin * 2 + ch * 2 + gap),
             self.BG,
         )
-        draw = ImageDraw.Draw(canvas)
         pad = _s(self.TEXT_PAD, scale)
         tmax, tmin = _s(self.TEXT_SIZE, scale), _s(self.TEXT_MIN, scale)
         tmax_h = _s(self.TEXT_MAX_H, scale)
@@ -243,7 +302,7 @@ class Grid4Layout(Layout):
             canvas.paste(im, (x, y))
             slot = Slot(x, y, cw, ch)
             slots.append(slot)
-            _draw_caption_bottom(draw, slot, texts[i], font, pad, tmax, tmin, tmax_h)
+            _draw_caption_by_style(canvas, slot, texts[i], font, pad, tmax, tmin, tmax_h, text_style)
         return RenderResult(canvas, slots)
 
 
