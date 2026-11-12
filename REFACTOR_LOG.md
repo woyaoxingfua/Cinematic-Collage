@@ -7,6 +7,22 @@
 
 ---
 
+## ⏸ 中断点快照（2026-11-13，因额度切换模型暂停）
+
+**给续跑的 agent：读完本节即可继续，无需翻聊天记录。**
+
+- 阶段 0–4 已完成并分别提交（最新 `7ffd864`），工作区干净。验收状态：pytest 74 passed、smoke 0、UI 自检 15/15
+- **剩余工作：**
+  1. 阶段 5（收尾）：重写 Readme.md（真实安装步骤：luts/fonts 已在仓库不用手动建、新功能、正确结构、实测 Python 3.12.5）；`.env.example` 补可选键 OPENAI_MODEL / AI_TIMEOUT / AI_MAX_TOKENS 并注明"模型必须是支持图片的视觉模型"；requirements.txt 写最低版本（customtkinter>=5.2、Pillow>=10.0、openai>=1.0、python-dotenv>=1.0、numpy>=1.24）并**移除 colour-science**（阶段 2 对拍已达标，filters.py 已是纯 numpy，tests/test_filters_parity.py 有 importorskip 会自动跳过）；写 build_exe.md（PyInstaller：`--collect-all customtkinter --add-data "fonts;fonts" --add-data "luts;luts"`，标注"未验证"，注明 onefile 模式下 settings.json/app.log 会写进临时目录的坑）；完成后 pytest + smoke + 本日志追加记录 + 单独提交
+  2. 阶段 6（可选加分项，全绿才做，**每项单独提交**）：四宫格布局（Layout 注册表新增，imaging.crop_to_fill 已备好）；「电影字幕」文字样式（居中白字黑描边+底部渐变遮罩，layouts.render 的 **opts 传 text_style）；自定义风格提示输入框（BuildOptions.extra_prompt 字段和 ai_connector.get_ai_texts 的 extra_prompt 参数已就绪，只差 UI 一个 CTkEntry）；电影竖排统一画幅（imaging.crop_to_aspect 已备好）
+  3. 最终晨报（写进本文件末尾）：每阶段完成/跳过/回退状态、需用户手动做的 3 件事（真实 Key 跑一次 3 张图、目检 samples/、确认 手写体.ttf 授权）、需拍板的问题、samples/ 路径清单
+- .env.example 当前内容只有 OPENAI_API_KEY / OPENAI_API_BASE 两行（刚读过，未改动）
+- 执行规则提醒：不读不提交 .env；GUI 只用 `timeout 30 .venv/Scripts/python.exe main.py --smoke-test` 验证；测试全 mock；新增注释用中文；不改 luts/、fonts/
+
+---
+
+---
+
 ## 阶段 0：准备 —— 完成
 
 - [x] 建分支 `refactor/usable-v3`
