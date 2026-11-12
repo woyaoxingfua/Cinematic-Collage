@@ -54,15 +54,27 @@ def main():
     def step3():
         check("重新渲染完成", app._result is not None and app._texts[0] == "手写的第一句")
         check("重新渲染保留输入", app._text_vars[0].get() == "手写的第一句")
+        # 自定义风格提示能流入 BuildOptions
+        app.extra_prompt_entry.insert(0, "带一点乡愁")
+        opts = app._collect_options(use_ai=True)
+        check("自定义风格提示流入选项", opts.extra_prompt == "带一点乡愁")
+        # 文字样式流入选项
+        check("文字样式流入选项", opts.text_style in ("经典底部", "电影字幕"))
         # 布局联动：切到单张海报时隐藏竖排样式
         app.layout_var.set("单张海报")
         app._on_layout_changed()
         check("海报时隐藏竖排样式", app.style_frame.winfo_manager() == "")
+        check("海报时隐藏文字样式", app.text_style_frame.winfo_manager() == "")
         check("数量提示已更新", "1 张" in app.count_hint_label.cget("text"))
         app.layout_var.set("电影竖排")
         app._on_layout_changed()
         check("竖排时恢复竖排样式", app.style_frame.winfo_manager() == "grid")
         check("数量提示为 2–6", "2–6" in app.count_hint_label.cget("text"))
+        app.layout_var.set("四宫格")
+        app._on_layout_changed()
+        check("四宫格数量提示为 4 张", "4 张" in app.count_hint_label.cget("text"))
+        app.layout_var.set("电影竖排")
+        app._on_layout_changed()
         # 画布交互：模拟缩放后不再处于适应模式
         app.image_canvas._zoom_at(100, 100, 1.5)
         check("缩放后退出适应模式", app.image_canvas.fit_mode is False)

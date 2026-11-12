@@ -287,6 +287,11 @@ class PhotoBoothApp(ctk.CTk):
         ctk.CTkOptionMenu(panel, values=CONTENT_STYLES, variable=self.content_var).grid(
             row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
 
+        # 自定义风格提示（追加到 AI 提示词；留空则不用）
+        self.extra_prompt_entry = ctk.CTkEntry(
+            panel, placeholder_text="自定义风格提示（可选，如：带一点乡愁）")
+        self.extra_prompt_entry.grid(row=r, column=0, sticky="ew", padx=12, pady=(0, 2)); r += 1
+
         # 6. 清晰度
         ctk.CTkLabel(panel, text="6. 清晰度").grid(
             row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
@@ -464,6 +469,7 @@ class PhotoBoothApp(ctk.CTk):
             content_style=self.content_var.get(),
             scale=SCALE_OPTIONS.get(self.scale_var.get(), 2.0),
             ai_enabled=use_ai and self._ai_ready and bool(self.ai_switch.get()),
+            extra_prompt=self.extra_prompt_entry.get(),
         )
 
     def _start_build(self, texts, use_ai):
