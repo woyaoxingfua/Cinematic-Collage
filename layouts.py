@@ -129,6 +129,23 @@ TEXT_STYLE_CLASSIC = "经典底部"
 TEXT_STYLE_SUBTITLE = "电影字幕"
 TEXT_STYLES = (TEXT_STYLE_CLASSIC, TEXT_STYLE_SUBTITLE)
 
+# 统一画幅（电影竖排可选；「原始」不裁切）
+ASPECT_ORIGINAL = "原始"
+ASPECTS = (ASPECT_ORIGINAL, "3:2", "4:3", "1:1")
+
+
+def _parse_aspect(aspect):
+    """"3:2" → (3.0, 2.0)；「原始」或非法值返回 None（不裁切）。"""
+    if not aspect or aspect == ASPECT_ORIGINAL:
+        return None
+    try:
+        aw, ah = (float(x) for x in str(aspect).split(":", 1))
+        if aw <= 0 or ah <= 0:
+            return None
+        return aw, ah
+    except ValueError:
+        return None
+
 
 def _make_gradient(w, h, max_alpha=170) -> Image.Image:
     """黑色竖向渐变条（RGBA）：顶部全透明 → 底部 max_alpha，作电影字幕遮罩。"""
@@ -208,7 +225,8 @@ class FilmStripLayout(Layout):
     def photo_width(self, scale) -> int:
         return _s(self.PHOTO_W, scale)
 
-    def render(self, photos, texts, font, scale=1.0, style="保留间隙", text_style=TEXT_STYLE_CLASSIC, **_) -> RenderResult:
+    def render(self, photos, texts, font, scale=1.0, style="保留间隙", text_style=TEXT_STYLE_CLASSIC,
+               aspect=ASPECT_ORIGINAL, **_) -> RenderResult:
         self.check_count(len(photos))
         n = len(photos)
         texts = list(texts or [])
@@ -220,8 +238,13 @@ class FilmStripLayout(Layout):
         hole_margin = max(1, (sw - hole) // 2)
         hole_spacing = max(hole * 2, _s(self.HOLE_SPACING, scale))
 
-        # 统一照片宽度（窄图会被放大到目标宽度，与旧版行为一致）
-        imgs = [imaging.resize_exact_width(im, pw) for im in photos]
+        # 统一画幅（可选）→ 统一照片宽度（窄图会被放大到目标宽度，与旧版行为一致）
+        aspect_pair = _parse_aspect(aspect)
+        imgs = []
+        for im in photos:
+            if aspect_pair:
+                im = imaging.crop_to_aspect(im, aspect_pair[0], aspect_pair[1])
+            imgs.append(imaging.resize_exact_width(im, pw))
         total_h = sum(im.height for im in imgs) + gap * (n - 1)
         total_w = sw * 2 + pw
 

@@ -117,6 +117,7 @@ DEFAULT_SETTINGS = {
     "layout": "电影竖排",
     "strip_style": "保留间隙",
     "text_style": "经典底部",
+    "aspect": "原始",
     "filter": "无",
     "font": "默认",
     "content_style": "简体短句",

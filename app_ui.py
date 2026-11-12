@@ -21,7 +21,7 @@ import config
 import filters
 import layouts
 import pipeline
-from layouts import TEXT_STYLES, TEXT_STYLE_CLASSIC
+from layouts import ASPECTS, ASPECT_ORIGINAL, TEXT_STYLES, TEXT_STYLE_CLASSIC
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +264,14 @@ class PhotoBoothApp(ctk.CTk):
         ctk.CTkOptionMenu(self.text_style_frame, values=list(TEXT_STYLES),
                           variable=self.text_style_var, width=130).pack(side="left", padx=3)
 
+        # 统一画幅（仅电影竖排支持）
+        self.aspect_frame = ctk.CTkFrame(panel, fg_color="transparent")
+        self.aspect_frame.grid(row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
+        ctk.CTkLabel(self.aspect_frame, text="统一画幅:").pack(side="left", padx=(2, 4))
+        self.aspect_var = StringVar(value=ASPECT_ORIGINAL)
+        ctk.CTkOptionMenu(self.aspect_frame, values=list(ASPECTS),
+                          variable=self.aspect_var, width=100).pack(side="left", padx=3)
+
         self.count_hint_label = ctk.CTkLabel(panel, text="", text_color="gray")
         self.count_hint_label.grid(row=r, column=0, sticky="w", padx=12, pady=(0, 2)); r += 1
 
@@ -355,6 +363,11 @@ class PhotoBoothApp(ctk.CTk):
             self.text_style_frame.grid()
         else:
             self.text_style_frame.grid_remove()
+        # 统一画幅仅电影竖排有效
+        if value == "电影竖排":
+            self.aspect_frame.grid()
+        else:
+            self.aspect_frame.grid_remove()
 
     def _on_ai_toggle(self):
         self._update_action_buttons()
@@ -464,6 +477,7 @@ class PhotoBoothApp(ctk.CTk):
             layout=self.layout_var.get(),
             strip_style=self.style_var.get(),
             text_style=self.text_style_var.get(),
+            aspect=self.aspect_var.get(),
             filter_name=self.filter_var.get(),
             font_name=self.font_var.get(),
             content_style=self.content_var.get(),
@@ -562,6 +576,8 @@ class PhotoBoothApp(ctk.CTk):
             self.style_var.set(s["strip_style"])
         if s.get("text_style") in TEXT_STYLES:
             self.text_style_var.set(s["text_style"])
+        if s.get("aspect") in ASPECTS:
+            self.aspect_var.set(s["aspect"])
         if s.get("filter") in (["无"] + filters.available_filters()):
             self.filter_var.set(s["filter"])
         if s.get("font") in self._font_names():
@@ -582,6 +598,7 @@ class PhotoBoothApp(ctk.CTk):
             "layout": self.layout_var.get(),
             "strip_style": self.style_var.get(),
             "text_style": self.text_style_var.get(),
+            "aspect": self.aspect_var.get(),
             "filter": self.filter_var.get(),
             "font": self.font_var.get(),
             "content_style": self.content_var.get(),

@@ -70,6 +70,10 @@ def main():
     r = strip.render(photos3, TEXTS_3, family, scale=3.0, style="保留间隙")
     save(r.image, "film_strip_gap_3x.png")
 
+    # 统一画幅 3:2
+    r = strip.render(photos3, TEXTS_3, family, scale=2.0, style="保留间隙", aspect="3:2")
+    save(r.image, "film_strip_aspect32_2x.png")
+
     # 电影竖排 5 张
     photos5 = photos3 + [make_photo(700, 700, 3), make_photo(640, 480, 4)]
     texts5 = TEXTS_3 + ["第四张的独白", "and the fifth one whispered"]

@@ -28,6 +28,7 @@ class BuildOptions:
     layout: str = "电影竖排"
     strip_style: str = "保留间隙"
     text_style: str = "经典底部"  # 经典底部 / 电影字幕
+    aspect: str = "原始"          # 电影竖排统一画幅：原始 / 3:2 / 4:3 / 1:1
     filter_name: str = "无"
     font_name: str = "默认"
     content_style: str = "简体短句"
@@ -105,5 +106,6 @@ def build(image_paths, options: BuildOptions, ai_client=None, texts=None, image_
         scale=options.scale,
         style=options.strip_style,
         text_style=options.text_style,
+        aspect=options.aspect,
     )
     return BuildResult(result.image, result.slots, texts, used_filter, warnings)
