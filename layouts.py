@@ -1,7 +1,13 @@
 # file: layouts.py
+import logging
+
 import numpy as np
 import colour
 from PIL import Image, ImageDraw, ImageFont
+
+import config
+
+logger = logging.getLogger(__name__)
 
 
 def create_film_strip_layout(images, style="保留间隙"):
@@ -111,10 +117,10 @@ def apply_filter(image, filter_name):
         return image
 
     try:
-        lut_path = f"luts/{filter_name}.cube"
+        lut_path = config.LUTS_DIR / f"{filter_name}.cube"
 
         # 1. 使用 colour.io.luts.read_LUT 方法加载LUT (根据项目规范)
-        lut = colour.io.luts.read_LUT(lut_path)
+        lut = colour.io.luts.read_LUT(str(lut_path))
 
         # 2. 将Pillow图片转换为NumPy数组，并确保颜色值在0-1之间
         image = image.convert("RGB")  # 确保是RGB格式
@@ -130,10 +136,10 @@ def apply_filter(image, filter_name):
         return Image.fromarray(filtered_array_8bit)
 
     except FileNotFoundError:
-        print(f"错误：找不到滤镜文件 {lut_path}！请检查luts文件夹和文件名。")
+        logger.error(f"错误：找不到滤镜文件 {lut_path}！请检查luts文件夹和文件名。")
         return image
     except Exception as e:
-        print(f"应用滤镜时发生错误: {e}")
+        logger.error(f"应用滤镜时发生错误: {e}")
         return image
 
 

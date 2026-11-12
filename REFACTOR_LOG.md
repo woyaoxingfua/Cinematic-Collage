@@ -22,3 +22,22 @@
 
 ### 验收
 - `pytest`：1 passed（基线编译）
+
+---
+
+## 阶段 1：地基 —— 完成
+
+- [x] `config.py` 新建：`APP_DIR` 基路径（FONTS_DIR / LUTS_DIR / SAMPLES_DIR / ENV_FILE / LOG_FILE / SETTINGS_FILE 全部由它派生）；`load_config()` 缺 .env 不抛异常，返回 `is_ready` + 中文提示；新增可选键 `OPENAI_MODEL`（默认 stepfun-ai/step3）、`AI_TIMEOUT`（默认 60）、`AI_MAX_TOKENS`（默认 800）；`setup_logging()` 滚动日志（app.log 1MB×2）；`load_settings()/save_settings()` 容错读写 settings.json
+- [x] 全部 `print` 替换为 `logging`（ai_connector.py、layouts.py；app_ui.py 本无 print）
+- [x] `main.py` 重写：删除前 190 行注释旧码，新增 `--smoke-test`（建窗 1 秒后自动销毁，退出码 0）
+- [x] `ai_connector.py` import 安全化：配置读取与客户端创建全部延迟到 `_get_client()`，缺 .env 不再在 import 时崩溃（本阶段保持旧接口 `get_ai_text`，阶段 3 重写）
+- [x] `app_ui.py` / `layouts.py` 的字体、滤镜目录改为 `config.FONTS_DIR` / `config.LUTS_DIR`，不再依赖 CWD
+
+### 验收结果
+- 临时移走 `.env`（仅改名未读取，测后已还原）→ `timeout 30 python main.py --smoke-test` 退出码 **0**
+- `cd /tmp && python <项目>/main.py --smoke-test` 退出码 **0**（证明不依赖工作目录）
+- `pytest`：1 passed
+
+### 保守决策记录
+- 日志文件不可写时 `setup_logging` 仅输出控制台（不因日志失败拖垮启动）
+- `app_ui.py` 里重复定义的 `on_resize` 留待阶段 4 整体重写时删除（本阶段不做无关格式化/顺手改）

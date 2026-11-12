@@ -5,6 +5,7 @@ from tkinter import filedialog, StringVar
 from PIL import Image, ImageTk  # 添加ImageTk模块
 import layouts
 import ai_connector
+import config  # 阶段1：路径集中管理，不依赖工作目录
 import threading
 import os  # 添加os模块用于读取目录内容
 from datetime import datetime  # 添加datetime模块用于生成文件名
@@ -129,19 +130,19 @@ class PhotoBoothApp(ctk.CTk):
         self.setup_ui()
 
     def get_font_options(self):
-        """获取fonts目录下的所有字体文件"""
+        """获取fonts目录下的所有字体文件（基于 APP_DIR，不依赖工作目录）"""
         font_options = ["默认"]
-        if os.path.exists("fonts"):
-            for file in os.listdir("fonts"):
+        if config.FONTS_DIR.exists():
+            for file in os.listdir(config.FONTS_DIR):
                 if file.endswith((".ttf", ".otf", ".ttc")):
                     font_options.append(file)
         return font_options
 
     def get_filter_options(self):
-        """获取luts目录下的所有滤镜文件"""
+        """获取luts目录下的所有滤镜文件（基于 APP_DIR，不依赖工作目录）"""
         filter_options = ["无"]
-        if os.path.exists("luts"):
-            for file in os.listdir("luts"):
+        if config.LUTS_DIR.exists():
+            for file in os.listdir(config.LUTS_DIR):
                 if file.endswith(".cube"):
                     # 移除文件扩展名
                     filter_name = file[:-5]  # 移除 ".cube" 扩展名
