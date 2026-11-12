@@ -68,3 +68,24 @@
 
 ### 样图路径（供早上目检）
 `samples/`：film_strip_gap_{1x,2x,3x}.png、film_strip_seamless_2x.png、film_strip_5photos_2x.png、film_strip_filtered_BlueArchitecture_2x.png、poster_{long_text,english,no_text}_2x.png
+
+---
+
+## 阶段 3：AI 层 —— 完成
+
+- [x] 客户端延迟创建（`get_client()` 首次调用才读配置），带 `timeout`（默认 60）与 `max_retries=2`；`set_client()/reset_client()` 支持测试注入
+- [x] 一次请求发 N 张缩小图（长边 ≤1024、JPEG q85），不再发整张拼好的成图；服务商报 BadRequest（不支持多图）时自动降级为逐张请求
+- [x] 提示词 JSON 示例按 N 动态生成；「恰好 N 条、每条 ≤20 汉字（英文 ≤15 词）」；风格预设字典 `STYLE_PROMPTS`；支持 `extra_prompt` 追加自定义风格要求（阶段 6 的输入框会用到）
+- [x] `parse_texts(raw, n)`：去 ```json 围栏 → 提取第一个配平 `{...}`/`[...]`（括号在字符串内时忽略）→ 支持 `{"texts":[...]}` 与纯数组 → 非字符串转 str（None→空串）→ 不足补空串、过多截断 → 完全失败按换行拆分兜底
+- [x] 错误绝不当文案：失败抛 `AiError`（中文），按异常类型映射（Key 无效 / 模型不存在需视觉模型 / 限流 / 超时 / 连接失败 / HTTP 状态码 / 通用）
+- [x] `app_ui.py` 适配层同步切换到新接口（AiError → 状态栏橙色提示 + 留空，不上图）
+- [x] 新增 20 个 mock 测试（不碰真实 API、不读 .env）
+
+### 验收结果
+- `pytest`：64 passed（新增围栏 JSON / 前后废话 / 纯数组 / 空回复 / 条数不符 / 非字符串元素 / 括号不配平兜底 / 多图→单图降级 / 各类异常映射 / 请求图片数 = N / 缺 .env import 安全）
+- `python main.py --smoke-test` 退出码 0
+
+### 保守决策记录
+- **空回复 / 全空白回复 → 抛 AiError**（方案原文只说"完全解析失败按换行拆分"，但空内容拆行只会得到全空串，用户会拿到无字成品却毫无提示；选择显式失败更符合"错误绝不当文案"的原则）
+- JSON 对象里没有 `texts` 键（如 `{"result": ...}`）→ 不强行取值，按换行拆分兜底
+- 降级为逐张请求时，单张也失败则整体抛 AiError（不静默丢某张的文案）

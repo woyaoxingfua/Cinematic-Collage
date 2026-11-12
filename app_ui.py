@@ -268,15 +268,15 @@ class PhotoBoothApp(ctk.CTk):
             family = textdraw.family_from_name(selected_font)
             n = len(images)
 
-            # 阶段 3 将改为把 N 张照片分别发给 AI；当前仍用旧接口（发无字成图）
+            # 阶段 3 新接口：一次请求发 N 张缩小图；失败抛 AiError（中文），绝不把报错上图
             self.after(0, lambda: self.status_label.configure(text="正在请求AI生成文字...", text_color="gray"))
-            plain = layout.render(filtered, [""] * n, family, scale=scale, style=selected_style).image
-            ai_texts = ai_connector.get_ai_text(plain, selected_content_style, n)
-            # 旧接口失败时会把报错字符串当文案返回——提前过滤，绝不让报错上图
-            bad_prefixes = ("AI调用失败", "AI未能生成文本", "AI返回了未知格式")
-            if any(str(t).startswith(bad_prefixes) for t in ai_texts):
+            try:
+                ai_texts = ai_connector.get_ai_texts(filtered, selected_content_style)
+            except ai_connector.AiError as e:
+                logger.warning(f"AI 配文失败：{e}")
                 ai_texts = []
-                self.after(0, lambda: self.status_label.configure(text="AI 配文失败，已留空可手动补", text_color="orange"))
+                self.after(0, lambda msg=str(e): self.status_label.configure(
+                    text=f"AI 配文失败（{msg}），已留空", text_color="orange"))
             ai_texts = (list(ai_texts) + [""] * n)[:n]
 
             self.after(0, lambda: self.status_label.configure(text="正在绘制文字...", text_color="gray"))
