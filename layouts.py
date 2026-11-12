@@ -147,8 +147,11 @@ def _parse_aspect(aspect):
         return None
 
 
-def _make_gradient(w, h, max_alpha=170) -> Image.Image:
-    """黑色竖向渐变条（RGBA）：顶部全透明 → 底部 max_alpha，作电影字幕遮罩。"""
+def _make_gradient(w, h, max_alpha=255) -> Image.Image:
+    """黑色竖向渐变条（RGBA）：顶部全透明 → 底部不透明，作电影字幕遮罩。
+
+    底部取 255（纯黑）：与胶卷黑色边框无缝衔接，避免照片颜色透出形成色偏接缝。
+    """
     arr = np.zeros((h, w, 4), dtype=np.uint8)
     ramp = np.linspace(0, max_alpha, h).astype(np.uint8)
     arr[..., 3] = ramp[:, None]
