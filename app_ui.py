@@ -1,323 +1,574 @@
-# file: app_ui.py（阶段 2 适配版：图像逻辑已迁移到 imaging/filters/layouts/textdraw；
-# 界面整体重写安排在阶段 4）
+# file: app_ui.py（阶段 4 重写）
+"""界面与调度：只负责收集选项、展示结果；图像逻辑全部在 pipeline 及其依赖里。
+
+线程模型：工作线程只做纯计算（pipeline.build），结果经 queue.Queue 由主线程
+after(100) 轮询取回——工作线程绝不直接触碰任何控件。
+"""
+from __future__ import annotations
 
 import logging
+import queue
+import threading
+from datetime import datetime
+from pathlib import Path
 
 import customtkinter as ctk
 from tkinter import filedialog, StringVar
-from PIL import ImageTk
+from PIL import Image, ImageTk
+
 import ai_connector
 import config
 import filters
-import imaging
 import layouts
-import textdraw
-import threading
-import os  # 读取目录内容
-from datetime import datetime  # 生成文件名
+import pipeline
 
 logger = logging.getLogger(__name__)
 
+SCALE_OPTIONS = {"标准 1×": 1.0, "高清 2×": 2.0, "超清 3×": 3.0}
+CONTENT_STYLES = ["简体短句", "繁体诗歌", "英文散文"]
+STRIP_STYLES = ("保留间隙", "无缝拼接")
+
 
 # ===================================================================
-# 【新】创建一个专门用于图片交互的画布控件类
+# 预览画布
+# ===================================================================
 class ImageCanvas(ctk.CTkFrame):
+    """可缩放 / 拖拽的预览画布。
+
+    - 双击 = 适应窗口；拖动 / 缩放后进入自由模式，窗口 resize 不再重置视图
+    - 以鼠标位置为中心缩放，范围 0.05–8；兼容 Linux 的 <Button-4/5>
+    - 拖动用 canvas.move（不重新采样）；缩放先 BILINEAR，停手 120ms 后 LANCZOS 补一次
+    """
+
+    ZOOM_MIN = 0.05
+    ZOOM_MAX = 8.0
+    FIT_MARGIN = 40
+
     def __init__(self, master):
         super().__init__(master)
-
-        # 创建画布控件
         self.canvas = ctk.CTkCanvas(self, background="#2B2B2B", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
 
-        # 初始化状态变量
-        self.original_image = None  # 存储原始的、未经缩放的Pillow图片
-        self.display_image = None  # 存储当前显示在画布上的CTkImage对象
-        self.scale = 1.0  # 当前的缩放比例
-        self.image_x = 0  # 图片在画布上的X坐标
-        self.image_y = 0  # 图片在画布上的Y坐标
+        self.original_image = None  # 原始成图（Pillow）
+        self._half_image = None     # 半分辨率副本（显示尺寸很小时加速重采样）
+        self._tk_image = None
+        self._image_item = None
+        self.scale = 1.0
+        self.image_x = 0.0
+        self.image_y = 0.0
+        self.fit_mode = True        # 「适应窗口」状态：只有此状态下 resize 才自动重排
+        self._resize_job = None     # resize 防抖
+        self._hq_job = None         # 高质量重绘延时
+        self._drag_x = 0
+        self._drag_y = 0
 
-        # 绑定滑鼠事件
-        self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)  # 滚轮缩放
-        self.canvas.bind("<ButtonPress-1>", self.on_button_press)  # 左键按下
-        self.canvas.bind("<B1-Motion>", self.on_drag)  # 左键拖动
+        # 事件绑定（绑定在画布本身，而不是整个窗口）
+        self.canvas.bind("<Configure>", self._on_configure)
+        self.canvas.bind("<MouseWheel>", self._on_wheel)  # Windows / macOS
+        self.canvas.bind("<Button-4>", lambda e: self._zoom_at(e.x, e.y, 1.1))     # Linux 放大
+        self.canvas.bind("<Button-5>", lambda e: self._zoom_at(e.x, e.y, 1 / 1.1))  # Linux 缩小
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<Double-Button-1>", lambda e: self.fit_to_window())
 
+    # --- 对外接口 ---
     def show_image(self, pillow_image):
-        """外部调用此方法来载入一张新图片"""
+        """载入新图片并适应窗口。"""
         self.original_image = pillow_image
-        self.fit_image_to_canvas()
+        self._half_image = None
+        self.fit_to_window()
 
-    def fit_image_to_canvas(self):
-        """【修正版】计算最佳缩放比例，让图片完整地显示在画布中央"""
-        if not self.original_image:
+    def fit_to_window(self):
+        """适应窗口（双击 / 新图载入 / 窗口变化且处于适应状态时调用）。"""
+        if self.original_image is None:
             return
-
-        # 【核心修正】在获取尺寸前，强制UI更新布局信息，确保获取到的是真实尺寸
         self.canvas.update_idletasks()
+        cw = max(1, self.canvas.winfo_width())
+        ch = max(1, self.canvas.winfo_height())
+        iw, ih = self.original_image.size
+        self.scale = min((cw - self.FIT_MARGIN) / iw, (ch - self.FIT_MARGIN) / ih)
+        self.scale = max(self.ZOOM_MIN, min(self.ZOOM_MAX, self.scale))
+        self.image_x = (cw - iw * self.scale) / 2
+        self.image_y = (ch - ih * self.scale) / 2
+        self.fit_mode = True
+        self._render(Image.Resampling.LANCZOS, allow_half=False)
 
-        canvas_width = self.canvas.winfo_width()
-        canvas_height = self.canvas.winfo_height()
+    # --- 事件处理 ---
+    def _on_configure(self, event):
+        # 防抖 150ms：只在停止变化后才重排，避免拖动窗口时反复重置
+        if self._resize_job is not None:
+            self.after_cancel(self._resize_job)
+        self._resize_job = self.after(150, self._on_configure_debounced)
 
-        # 【删除】我们不再需要延时重试的逻辑了
+    def _on_configure_debounced(self):
+        self._resize_job = None
+        if self.fit_mode and self.original_image is not None:
+            self.fit_to_window()
 
-        # ...后续的缩放和居中逻辑保持不变...
-        img_ratio = self.original_image.width / self.original_image.height
-        canvas_ratio = canvas_width / canvas_height
+    def _on_wheel(self, event):
+        factor = 1.1 if event.delta > 0 else 1 / 1.1
+        self._zoom_at(event.x, event.y, factor)
 
-        if img_ratio > canvas_ratio:
-            self.scale = canvas_width / self.original_image.width
-        else:
-            self.scale = canvas_height / self.original_image.height
-
-        self.image_x = (canvas_width - self.original_image.width * self.scale) / 2
-        self.image_y = (canvas_height - self.original_image.height * self.scale) / 2
-
-        self._redraw_image()
-
-    def _redraw_image(self):
-        """核心重绘函数：根据当前缩放和位置，在画布上重新绘制图片"""
-        if not self.original_image:
+    def _zoom_at(self, cx, cy, factor):
+        if self.original_image is None:
             return
+        new_scale = max(self.ZOOM_MIN, min(self.ZOOM_MAX, self.scale * factor))
+        if abs(new_scale - self.scale) < 1e-9:
+            return
+        # 以鼠标位置 (cx, cy) 为不动点缩放
+        k = new_scale / self.scale
+        self.image_x = cx - (cx - self.image_x) * k
+        self.image_y = cy - (cy - self.image_y) * k
+        self.scale = new_scale
+        self.fit_mode = False
+        self._render(Image.Resampling.BILINEAR)
+        # 停手 120ms 后用 LANCZOS 补一次高质量渲染
+        if self._hq_job is not None:
+            self.after_cancel(self._hq_job)
+        self._hq_job = self.after(120, self._render_hq)
 
-        # 清空画布
-        self.canvas.delete("all")
+    def _render_hq(self):
+        self._hq_job = None
+        if self.original_image is not None:
+            self._render(Image.Resampling.LANCZOS, allow_half=False)
 
-        # 根据缩放比例计算新的宽高
-        new_width = int(self.original_image.width * self.scale)
-        new_height = int(self.original_image.height * self.scale)
+    def _on_press(self, event):
+        self._drag_x = event.x
+        self._drag_y = event.y
 
-        # 使用Pillow缩放图片
-        resized_img = self.original_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-        # 转换为PhotoImage并放置在画布上
-        self.display_image = ImageTk.PhotoImage(resized_img)
-        self.canvas.create_image(self.image_x, self.image_y, anchor="nw", image=self.display_image)
-
-    def on_mouse_wheel(self, event):
-        """响应鼠标滚轮事件，进行缩放"""
-        # event.delta 在Windows和macOS上符号不同，但通常是120的倍数
-        if event.delta > 0:
-            self.scale *= 1.1  # 放大
-        else:
-            self.scale /= 1.1  # 缩小
-        self._redraw_image()
-
-    def on_button_press(self, event):
-        """响应鼠标左键按下事件，记录拖动起点"""
-        self.drag_start_x = event.x
-        self.drag_start_y = event.y
-
-    def on_drag(self, event):
-        """响应鼠标拖动事件，移动图片"""
-        dx = event.x - self.drag_start_x
-        dy = event.y - self.drag_start_y
-
+    def _on_drag(self, event):
+        if self._image_item is None:
+            return
+        dx = event.x - self._drag_x
+        dy = event.y - self._drag_y
+        self._drag_x = event.x
+        self._drag_y = event.y
         self.image_x += dx
         self.image_y += dy
+        self.fit_mode = False
+        self.canvas.move(self._image_item, dx, dy)  # 移动图元，不重新采样
 
-        # 更新拖动起点
-        self.drag_start_x = event.x
-        self.drag_start_y = event.y
-
-        self._redraw_image()
+    # --- 渲染 ---
+    def _render(self, resampling, allow_half=True):
+        """按当前 scale / 位置重绘画布。BILINEAR 快渲可用半分辨率副本，LANCZOS 用原图。"""
+        if self.original_image is None:
+            return
+        disp_w = max(1, round(self.original_image.width * self.scale))
+        disp_h = max(1, round(self.original_image.height * self.scale))
+        src = self.original_image
+        if allow_half and disp_w * 2 < self.original_image.width:
+            if self._half_image is None:
+                half = self.original_image.copy()
+                half.thumbnail(
+                    (max(1, self.original_image.width // 2), max(1, self.original_image.height // 2)),
+                    Image.Resampling.BILINEAR,
+                )
+                self._half_image = half
+            src = self._half_image
+        w = max(1, round(src.width * disp_w / self.original_image.width))
+        h = max(1, round(src.height * disp_h / self.original_image.height))
+        img = src.resize((w, h), resampling)
+        self._tk_image = ImageTk.PhotoImage(img)
+        if self._image_item is None:
+            self._image_item = self.canvas.create_image(
+                self.image_x, self.image_y, anchor="nw", image=self._tk_image)
+        else:
+            self.canvas.itemconfig(self._image_item, image=self._tk_image)
+            self.canvas.coords(self._image_item, self.image_x, self.image_y)
+        self.canvas.tag_raise(self._image_item)
 
 
 # ===================================================================
-
+# 主应用
+# ===================================================================
 class PhotoBoothApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.style_choice_var = StringVar(value="保留间隙")
-        self.title("电影感照片生成器 V2.2 - 交互式预览")
-        self.geometry("1200x800")
-        self.resizable(True, True)
-        self.bind("<Configure>", self.on_resize)  # 窗口大小变化时也需要重绘
+        self.title("电影感照片生成器 V3.0")
+        self.geometry("1280x860")
+        self.minsize(980, 640)
 
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_columnconfigure(1, weight=4)
+        self.settings = config.load_settings()
+        self._ai_ready = config.load_config().is_ready
+
+        # 生成状态
+        self._queue = queue.Queue()
+        self._photo_cache = {}   # path -> Image：已读照片（换设置不重读）
+        self._paths = []         # 当前照片路径列表
+        self._texts = None       # 当前文案（None = 尚未生成过）
+        self._result = None      # 最近一次 pipeline.BuildResult
+        self._busy = False
+        self._text_vars = []
+
+        self.grid_columnconfigure(0, weight=0)
+        self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
-        self.setup_ui()
+        self._build_controls()
 
-    def get_font_options(self):
-        """获取fonts目录下的所有字体文件（基于 APP_DIR，不依赖工作目录）"""
-        font_options = ["默认"]
-        if config.FONTS_DIR.exists():
-            for file in os.listdir(config.FONTS_DIR):
-                if file.endswith((".ttf", ".otf", ".ttc")):
-                    font_options.append(file)
-        return font_options
-
-    def get_filter_options(self):
-        """获取luts目录下的所有滤镜文件（基于 APP_DIR，不依赖工作目录）"""
-        filter_options = ["无"]
-        if config.LUTS_DIR.exists():
-            for file in os.listdir(config.LUTS_DIR):
-                if file.endswith(".cube"):
-                    # 移除文件扩展名
-                    filter_name = file[:-5]  # 移除 ".cube" 扩展名
-                    filter_options.append(filter_name)
-        return filter_options
-
-    def setup_ui(self):
-        control_frame = ctk.CTkFrame(master=self)
-        control_frame.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
-        # ... (左侧控制面板的UI控件创建和之前一样，此处省略) ...
-        ctk.CTkLabel(master=control_frame, text="1. 开始创作").pack(pady=(20, 5), padx=20)
-        self.process_button = ctk.CTkButton(master=control_frame, text="选择照片并生成",
-                                            command=self.start_generation_thread)
-        self.process_button.pack(pady=5, padx=20)
-        ctk.CTkLabel(master=control_frame, text="2. 选择排版风格").pack(pady=(20, 5), padx=20)
-        layout_options = ["电影竖排", "单张海报"]
-        self.layout_option_menu = ctk.CTkOptionMenu(master=control_frame, values=layout_options)
-        self.layout_option_menu.pack(pady=5, padx=20, fill="x")
-        style_frame = ctk.CTkFrame(master=control_frame)
-        style_frame.pack(pady=10, padx=20, fill="x")
-        ctk.CTkLabel(master=style_frame, text="竖排样式:").pack(side="left", padx=10)
-        ctk.CTkRadioButton(master=style_frame, text="保留间隙", variable=self.style_choice_var, value="保留间隙").pack(
-            side="left", padx=5)
-        ctk.CTkRadioButton(master=style_frame, text="无缝拼接", variable=self.style_choice_var, value="无缝拼接").pack(
-            side="left", padx=5)
-        ctk.CTkLabel(master=control_frame, text="3. 选择电影滤镜").pack(pady=(20, 5), padx=20)
-        # 使用动态加载的滤镜选项
-        filter_options = self.get_filter_options()
-        self.filter_option_menu = ctk.CTkOptionMenu(master=control_frame, values=filter_options)
-        self.filter_option_menu.pack(pady=5, padx=20, fill="x")
-        ctk.CTkLabel(master=control_frame, text="4. 选择文字风格").pack(pady=(20, 5), padx=20)
-        # 使用动态加载的字体选项
-        font_options = self.get_font_options()
-        self.font_option_menu = ctk.CTkOptionMenu(master=control_frame, values=font_options)
-        self.font_option_menu.pack(pady=5, padx=20, fill="x")
-        content_style_options = ["简体短句", "繁体诗歌", "英文散文"]
-        self.content_style_menu = ctk.CTkOptionMenu(master=control_frame, values=content_style_options)
-        self.content_style_menu.pack(pady=10, padx=20, fill="x")
-        
-        # 添加保存图片按钮
-        self.save_button = ctk.CTkButton(master=control_frame, text="保存图片", 
-                                        command=self.save_image, state="disabled")
-        self.save_button.pack(pady=10, padx=20, fill="x")
-        
-        self.status_label = ctk.CTkLabel(master=control_frame, text="一切就绪，请开始创作")
-        self.status_label.pack(pady=20, padx=20)
-
-        # 【核心修改】用我们新的ImageCanvas替换掉旧的Frame和Label
         self.image_canvas = ImageCanvas(self)
-        self.image_canvas.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
-        
-    def on_resize(self, event):
-        """当整个App窗口大小改变时，让图片自适应"""
-        # 调用我们自定义控件的自适应方法
-        self.image_canvas.fit_image_to_canvas()
+        self.image_canvas.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
 
-    def on_resize(self, event):
-        """当整个App窗口大小改变时，让图片自适应"""
-        # 调用我们自定义控件的自适应方法
-        self.image_canvas.fit_image_to_canvas()
+        self._restore_settings()
+        self._poll_queue()  # 主线程轮询工作线程结果
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def start_generation_thread(self):
-        """按钮回调：文件对话框必须在主线程弹出，选完文件再开工作线程做纯计算。"""
-        self.process_button.configure(state="disabled", text="生成中...")
-        self.select_files_and_proceed()
+    # ------------------------------------------------------------------
+    # 控件
+    # ------------------------------------------------------------------
+    def _font_names(self):
+        names = ["默认"]
+        if config.FONTS_DIR.exists():
+            names += sorted(
+                p.name for p in config.FONTS_DIR.iterdir()
+                if p.suffix.lower() in (".ttf", ".otf", ".ttc")
+            )
+        return names
 
-    def select_files_and_proceed(self):
-        selected_layout = self.layout_option_menu.get()
-        selected_style = self.style_choice_var.get()
-        selected_filter = self.filter_option_menu.get()
-        selected_font = self.font_option_menu.get()
-        selected_content_style = self.content_style_menu.get()
+    def _build_controls(self):
+        panel = ctk.CTkScrollableFrame(master=self, width=330)
+        panel.grid(row=0, column=0, padx=(10, 0), pady=10, sticky="nsw")
+        panel.grid_columnconfigure(0, weight=1)
+        self.panel = panel
+        r = 0
+
+        # 1. 开始创作
+        ctk.CTkLabel(panel, text="1. 选择照片并生成").grid(
+            row=r, column=0, sticky="w", padx=12, pady=(10, 2)); r += 1
+        self.generate_button = ctk.CTkButton(panel, text="选择照片并生成", command=self.on_generate)
+        self.generate_button.grid(row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
+
+        # 2. 排版风格
+        ctk.CTkLabel(panel, text="2. 排版风格").grid(
+            row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
+        self.layout_var = StringVar(value="电影竖排")
+        self.layout_menu = ctk.CTkOptionMenu(
+            panel, values=list(layouts.LAYOUTS), variable=self.layout_var,
+            command=self._on_layout_changed)
+        self.layout_menu.grid(row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
+
+        # 竖排样式（仅电影竖排时显示；grid_remove 可保持位置记忆）
+        self.style_frame = ctk.CTkFrame(panel, fg_color="transparent")
+        self.style_frame.grid(row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
+        ctk.CTkLabel(self.style_frame, text="竖排样式:").pack(side="left", padx=(2, 4))
+        self.style_var = StringVar(value="保留间隙")
+        for text in STRIP_STYLES:
+            ctk.CTkRadioButton(self.style_frame, text=text, variable=self.style_var,
+                               value=text).pack(side="left", padx=3)
+
+        self.count_hint_label = ctk.CTkLabel(panel, text="", text_color="gray")
+        self.count_hint_label.grid(row=r, column=0, sticky="w", padx=12, pady=(0, 2)); r += 1
+
+        # 3. 电影滤镜
+        ctk.CTkLabel(panel, text="3. 电影滤镜").grid(
+            row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
+        self.filter_var = StringVar(value="无")
+        ctk.CTkOptionMenu(panel, values=["无"] + filters.available_filters(),
+                          variable=self.filter_var).grid(
+            row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
+
+        # 4. 字体与文字风格
+        ctk.CTkLabel(panel, text="4. 字体").grid(
+            row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
+        self.font_var = StringVar(value="默认")
+        ctk.CTkOptionMenu(panel, values=self._font_names(), variable=self.font_var).grid(
+            row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
+        ctk.CTkLabel(panel, text="5. 文字风格（AI 生成的内容风格）").grid(
+            row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
+        self.content_var = StringVar(value="简体短句")
+        ctk.CTkOptionMenu(panel, values=CONTENT_STYLES, variable=self.content_var).grid(
+            row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
+
+        # 6. 清晰度
+        ctk.CTkLabel(panel, text="6. 清晰度").grid(
+            row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
+        self.scale_var = StringVar(value="高清 2×")
+        ctk.CTkOptionMenu(panel, values=list(SCALE_OPTIONS), variable=self.scale_var).grid(
+            row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
+
+        # 7. AI 配文开关
+        self.ai_switch = ctk.CTkSwitch(
+            panel, text="AI 配文（关闭则手动写字）",
+            onvalue=True, offvalue=False, command=self._on_ai_toggle)
+        self.ai_switch.grid(row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
+        if not self._ai_ready:
+            self.ai_switch.deselect()
+            self.ai_switch.configure(state="disabled")
+            ctk.CTkLabel(
+                panel, text="未检测到 .env 配置：已切换为纯手动模式，可在下方直接写字",
+                text_color="orange", wraplength=290, justify="left",
+            ).grid(row=r, column=0, sticky="w", padx=12, pady=(0, 4)); r += 1
+
+        # 配文输入区（生成后出现 N 个输入框）
+        ctk.CTkLabel(panel, text="配文（生成后可在此手动修改）").grid(
+            row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
+        self.texts_frame = ctk.CTkFrame(panel, fg_color="transparent")
+        self.texts_frame.grid(row=r, column=0, sticky="ew", padx=8, pady=(0, 4)); r += 1
+
+        # 操作按钮
+        self.rerender_button = ctk.CTkButton(
+            panel, text="重新渲染（不调用 AI）", command=self.on_rerender, state="disabled")
+        self.rerender_button.grid(row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
+        self.regen_text_button = ctk.CTkButton(
+            panel, text="重新生成文字（调用 AI）", command=self.on_regen_text, state="disabled")
+        self.regen_text_button.grid(row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
+        self.save_button = ctk.CTkButton(
+            panel, text="保存图片", command=self.on_save, state="disabled")
+        self.save_button.grid(row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
+
+        # 进度条（不定长；仅忙时显示）
+        self.progress = ctk.CTkProgressBar(panel, mode="indeterminate")
+        self.progress.grid(row=r, column=0, sticky="ew", padx=12, pady=(8, 2)); r += 1
+        self.progress.grid_remove()
+        self.progress.set(0)
+
+        self.status_label = ctk.CTkLabel(panel, text="一切就绪，请开始创作", wraplength=290,
+                                         justify="left")
+        self.status_label.grid(row=r, column=0, sticky="w", padx=12, pady=(6, 12)); r += 1
+
+    def _on_layout_changed(self, value=None):
+        value = value or self.layout_var.get()
         try:
-            layout = layouts.get(selected_layout)
+            layout = layouts.get(value)
+        except ValueError:
+            return
+        self.count_hint_label.configure(text=f"请选择 {layout.count_hint()}")
+        if value == "电影竖排":
+            self.style_frame.grid()
+        else:
+            self.style_frame.grid_remove()
+
+    def _on_ai_toggle(self):
+        self._update_action_buttons()
+
+    def _rebuild_text_inputs(self):
+        """按当前照片数重建 N 个文字输入框，显示已知文案。"""
+        for w in self.texts_frame.winfo_children():
+            w.destroy()
+        self._text_vars = []
+        n = len(self._paths)
+        for i in range(n):
+            value = self._texts[i] if self._texts and i < len(self._texts) else ""
+            var = StringVar(value=value)
+            self._text_vars.append(var)
+            entry = ctk.CTkEntry(self.texts_frame, textvariable=var,
+                                 placeholder_text=f"第 {i + 1} 张的文字（可留空）")
+            entry.pack(pady=2, padx=4, fill="x")
+
+    def _collect_texts(self):
+        if self._text_vars:
+            return [v.get() for v in self._text_vars]
+        return [""] * max(1, len(self._paths))
+
+    def _update_action_buttons(self):
+        has_result = self._result is not None
+        ai_on = self._ai_ready and bool(self.ai_switch.get())
+        self.rerender_button.configure(
+            state="normal" if (has_result and not self._busy) else "disabled")
+        self.regen_text_button.configure(
+            state="normal" if (has_result and ai_on and not self._busy) else "disabled")
+        self.save_button.configure(
+            state="normal" if (has_result and not self._busy) else "disabled")
+
+    def _set_busy(self, busy, message="正在生成..."):
+        self._busy = busy
+        if busy:
+            self.generate_button.configure(state="disabled", text="生成中...")
+            self.progress.grid()
+            self.progress.start()
+            self.status_label.configure(text=message, text_color="gray")
+        else:
+            self.generate_button.configure(state="normal", text="选择照片并生成")
+            self.progress.stop()
+            self.progress.grid_remove()
+        self._update_action_buttons()
+
+    # ------------------------------------------------------------------
+    # 生成流程
+    # ------------------------------------------------------------------
+    def on_generate(self):
+        if self._busy:
+            return
+        try:
+            layout = layouts.get(self.layout_var.get())
         except ValueError as e:
             self.status_label.configure(text=str(e), text_color="red")
-            self.process_button.configure(state="normal", text="选择照片并生成")
             return
-        image_paths = filedialog.askopenfilenames(
+        paths = self._ask_photos(layout)
+        if not paths:
+            return
+        self._paths = paths
+        self._texts = None
+        self._photo_cache.clear()  # 换了一组照片，清掉旧缓存
+        self._result = None
+        self._rebuild_text_inputs()
+        self._start_build(texts=None, use_ai=True)
+
+    def _ask_photos(self, layout):
+        types = [("图片文件", "*.jpg *.jpeg *.png *.webp *.bmp")]
+        try:
+            import pillow_heif  # 可选依赖：装了才支持 HEIC
+
+            pillow_heif.register_heif_opener()
+            types.append(("HEIC 图片", "*.heic *.heif"))
+        except ImportError:
+            pass
+        types.append(("所有文件", "*.*"))
+        paths = filedialog.askopenfilenames(
             title=f"请选择 {layout.count_hint()}",
-            filetypes=[("Image Files", "*.jpg *.jpeg *.png *.webp *.bmp"), ("All files", "*.*")])
-        if not image_paths:
+            filetypes=types,
+        )
+        if not paths:
             self.status_label.configure(text="已取消选择", text_color="gray")
-            self.process_button.configure(state="normal", text="选择照片并生成")
-            return
-        if not (layout.min_photos <= len(image_paths) <= layout.max_photos):
-            self.status_label.configure(text=f"错误: 需要 {layout.count_hint()}!", text_color="red")
-            self.process_button.configure(state="normal", text="选择照片并生成")
-            return
-        args = (list(image_paths), layout, selected_style, selected_filter, selected_font, selected_content_style)
-        thread = threading.Thread(target=self.process_after_selection, args=args)
-        thread.daemon = True
-        thread.start()
+            return None
+        if not (layout.min_photos <= len(paths) <= layout.max_photos):
+            self.status_label.configure(
+                text=f"错误：需要 {layout.count_hint()}，实际选择了 {len(paths)} 张",
+                text_color="red")
+            return None
+        return list(paths)
 
-    def process_after_selection(self, image_paths, layout, selected_style, selected_filter, selected_font,
-                                selected_content_style):
-        """工作线程：只做纯计算，所有 UI 更新都通过 self.after 投递回主线程。"""
-        try:
-            self.after(0, lambda: self.status_label.configure(text="读取照片中...", text_color="gray"))
-            images = [imaging.load_image(p) for p in image_paths]
-            scale = 2.0  # 阶段 4 会提供「清晰度」选项
-            target_w = layout.photo_width(scale)
+    def on_rerender(self):
+        """用输入框里的文字 + 当前全部设置重新渲染，不调用 AI（省 token）。"""
+        if self._busy or not self._paths:
+            return
+        self._texts = self._collect_texts()
+        self._start_build(texts=self._texts, use_ai=False)
 
-            self.after(0, lambda: self.status_label.configure(text="滤镜应用中...", text_color="gray"))
+    def on_regen_text(self):
+        """重新调用 AI 生成文字（会覆盖输入框内容）。"""
+        if self._busy or not self._paths:
+            return
+        self._start_build(texts=None, use_ai=True)
+
+    def _collect_options(self, use_ai):
+        return pipeline.BuildOptions(
+            layout=self.layout_var.get(),
+            strip_style=self.style_var.get(),
+            filter_name=self.filter_var.get(),
+            font_name=self.font_var.get(),
+            content_style=self.content_var.get(),
+            scale=SCALE_OPTIONS.get(self.scale_var.get(), 2.0),
+            ai_enabled=use_ai and self._ai_ready and bool(self.ai_switch.get()),
+        )
+
+    def _start_build(self, texts, use_ai):
+        options = self._collect_options(use_ai)
+        ai_client = ai_connector if (texts is None and options.ai_enabled) else None
+        self._set_busy(True)
+
+        def work():
+            # 工作线程：只做纯计算，结果投递到队列
             try:
-                # 先缩放到目标尺寸再套滤镜（避免对超大原图全尺寸计算）
-                filtered = [filters.apply_filter(imaging.resize_to_width(im, target_w), selected_filter)
-                            for im in images]
-            except filters.FilterError as e:
-                logger.warning(f"滤镜不可用，已跳过：{e}")
-                self.after(0, lambda msg=str(e): self.status_label.configure(
-                    text=f"滤镜不可用已跳过：{msg}", text_color="orange"))
-                filtered = [imaging.resize_to_width(im, target_w) for im in images]
+                result = pipeline.build(
+                    self._paths, options,
+                    ai_client=ai_client, texts=texts,
+                    image_cache=self._photo_cache,
+                )
+                self._queue.put(("done", result))
+            except Exception as e:
+                logger.exception("生成失败")
+                self._queue.put(("error", str(e)))
 
-            family = textdraw.family_from_name(selected_font)
-            n = len(images)
+        threading.Thread(target=work, daemon=True).start()
 
-            # 阶段 3 新接口：一次请求发 N 张缩小图；失败抛 AiError（中文），绝不把报错上图
-            self.after(0, lambda: self.status_label.configure(text="正在请求AI生成文字...", text_color="gray"))
-            try:
-                ai_texts = ai_connector.get_ai_texts(filtered, selected_content_style)
-            except ai_connector.AiError as e:
-                logger.warning(f"AI 配文失败：{e}")
-                ai_texts = []
-                self.after(0, lambda msg=str(e): self.status_label.configure(
-                    text=f"AI 配文失败（{msg}），已留空", text_color="orange"))
-            ai_texts = (list(ai_texts) + [""] * n)[:n]
-
-            self.after(0, lambda: self.status_label.configure(text="正在绘制文字...", text_color="gray"))
-            result = layout.render(filtered, ai_texts, family, scale=scale, style=selected_style)
-
-            self.after(0, self.update_status_and_display, result.image)
-
-        except Exception as e:
-            logger.exception("生成失败")
-            self.after(0, lambda msg=str(e): self.status_label.configure(
-                text=f"发生未知错误: {msg}", text_color="red"))
-        finally:
-            self.after(0, lambda: self.process_button.configure(state="normal", text="选择照片并生成"))
-
-    def update_status_and_display(self, final_image):
-        """更新状态，并让新的画布控件显示图片"""
-        self.status_label.configure(text="大功告成！请在右侧交互！", text_color="green")
-        self.image_canvas.show_image(final_image)
-        # 启用保存按钮
-        self.save_button.configure(state="normal")
-
-    def save_image(self):
-        """保存生成的图片到本地"""
-        if not hasattr(self, 'final_image_with_text'):
-            self.status_label.configure(text="没有可保存的图片！", text_color="red")
-            return
-            
+    def _poll_queue(self):
+        """主线程每 100ms 轮询一次工作线程结果。"""
         try:
-            # 打开保存文件对话框
-            file_path = filedialog.asksaveasfilename(
-                defaultextension=".png",
-                filetypes=[("PNG files", "*.png"), ("JPEG files", "*.jpg"), ("All files", "*.*")],
-                title="保存图片",
-                initialfile=f"photomagic_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            )
-            
-            # 如果用户选择了文件路径，则保存图片
-            if file_path:
-                self.final_image_with_text.save(file_path)
-                self.status_label.configure(text=f"图片已保存到: {file_path}", text_color="green")
+            while True:
+                kind, payload = self._queue.get_nowait()
+                if kind == "done":
+                    self._on_build_done(payload)
+                elif kind == "error":
+                    self._on_build_error(payload)
+        except queue.Empty:
+            pass
+        self.after(100, self._poll_queue)
+
+    def _on_build_done(self, result):
+        self._result = result
+        self._texts = list(result.texts)
+        self._set_busy(False)
+        self._rebuild_text_inputs()
+        self.image_canvas.show_image(result.image)
+        if result.warnings:
+            self.status_label.configure(text="；".join(result.warnings), text_color="orange")
+        else:
+            self.status_label.configure(
+                text="大功告成！可修改左侧文字后「重新渲染」", text_color="green")
+
+    def _on_build_error(self, message):
+        self._set_busy(False)
+        self.status_label.configure(text=f"生成失败：{message}", text_color="red")
+
+    # ------------------------------------------------------------------
+    # 保存
+    # ------------------------------------------------------------------
+    def on_save(self):
+        if self._result is None:
+            return
+        initial_dir = self.settings.get("last_save_dir") or None
+        path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG 图片", "*.png"), ("JPEG 图片", "*.jpg")],
+            title="保存图片",
+            initialfile=f"photomagic_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            initialdir=initial_dir,
+        )
+        if not path:
+            self.status_label.configure(text="保存已取消", text_color="gray")
+            return
+        try:
+            if path.lower().endswith((".jpg", ".jpeg")):
+                self._result.image.save(path, quality=95)
             else:
-                self.status_label.configure(text="保存操作已取消", text_color="green")
+                self._result.image.save(path)
+            self.settings["last_save_dir"] = str(Path(path).parent)
+            config.save_settings(self.settings)
+            self.status_label.configure(text=f"已保存：{path}", text_color="green")
+            logger.info(f"图片已保存到 {path}")
         except Exception as e:
-            self.status_label.configure(text=f"保存图片时出错: {str(e)}", text_color="red")
+            logger.exception("保存失败")
+            self.status_label.configure(text=f"保存失败：{e}", text_color="red")
+
+    # ------------------------------------------------------------------
+    # 设置持久化
+    # ------------------------------------------------------------------
+    def _restore_settings(self):
+        s = self.settings
+        if s.get("layout") in layouts.LAYOUTS:
+            self.layout_var.set(s["layout"])
+        if s.get("strip_style") in STRIP_STYLES:
+            self.style_var.set(s["strip_style"])
+        if s.get("filter") in (["无"] + filters.available_filters()):
+            self.filter_var.set(s["filter"])
+        if s.get("font") in self._font_names():
+            self.font_var.set(s["font"])
+        if s.get("content_style") in CONTENT_STYLES:
+            self.content_var.set(s["content_style"])
+        if s.get("scale") in SCALE_OPTIONS:
+            self.scale_var.set(s["scale"])
+        if self._ai_ready and s.get("ai_enabled", True):
+            self.ai_switch.select()
+        else:
+            self.ai_switch.deselect()
+        self._on_layout_changed()
+        self._update_action_buttons()
+
+    def _save_settings(self):
+        self.settings.update({
+            "layout": self.layout_var.get(),
+            "strip_style": self.style_var.get(),
+            "filter": self.filter_var.get(),
+            "font": self.font_var.get(),
+            "content_style": self.content_var.get(),
+            "scale": self.scale_var.get(),
+            "ai_enabled": bool(self.ai_switch.get()) if self._ai_ready else True,
+            "last_save_dir": self.settings.get("last_save_dir", ""),
+        })
+        config.save_settings(self.settings)
+
+    def _on_close(self):
+        try:
+            self._save_settings()
+        finally:
+            self.destroy()
