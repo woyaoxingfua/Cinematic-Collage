@@ -1,14 +1,22 @@
-# file: app_ui.py (终极交互版)
+# file: app_ui.py（阶段 2 适配版：图像逻辑已迁移到 imaging/filters/layouts/textdraw；
+# 界面整体重写安排在阶段 4）
+
+import logging
 
 import customtkinter as ctk
 from tkinter import filedialog, StringVar
-from PIL import Image, ImageTk  # 添加ImageTk模块
-import layouts
+from PIL import ImageTk
 import ai_connector
-import config  # 阶段1：路径集中管理，不依赖工作目录
+import config
+import filters
+import imaging
+import layouts
+import textdraw
 import threading
-import os  # 添加os模块用于读取目录内容
-from datetime import datetime  # 添加datetime模块用于生成文件名
+import os  # 读取目录内容
+from datetime import datetime  # 生成文件名
+
+logger = logging.getLogger(__name__)
 
 
 # ===================================================================
@@ -204,76 +212,84 @@ class PhotoBoothApp(ctk.CTk):
         # 调用我们自定义控件的自适应方法
         self.image_canvas.fit_image_to_canvas()
 
-    # # ... (start_generation_thread, generation_logic, select_files_and_proceed 等函数保持不变) ...
     def start_generation_thread(self):
+        """按钮回调：文件对话框必须在主线程弹出，选完文件再开工作线程做纯计算。"""
         self.process_button.configure(state="disabled", text="生成中...")
-        thread = threading.Thread(target=self.generation_logic)
-        thread.daemon = True
-        thread.start()
+        self.select_files_and_proceed()
 
-    def generation_logic(self):
+    def select_files_and_proceed(self):
         selected_layout = self.layout_option_menu.get()
         selected_style = self.style_choice_var.get()
         selected_filter = self.filter_option_menu.get()
         selected_font = self.font_option_menu.get()
         selected_content_style = self.content_style_menu.get()
-        num_images_needed = 3 if selected_layout == "电影竖排" else 1
-        self.after(0, lambda: self.select_files_and_proceed(num_images_needed, selected_layout, selected_style,
-                                                            selected_filter, selected_font, selected_content_style))
-
-    def select_files_and_proceed(self, num_images, *args):
-        image_paths = filedialog.askopenfilenames(title=f"请选择 {num_images} 张照片",
-                                                  filetypes=[("Image Files", "*.jpg *.jpeg *.png")])
-        if len(image_paths) != num_images:
-            self.status_label.configure(text=f"错误: 需要 {num_images} 张图片!", text_color="red")
+        try:
+            layout = layouts.get(selected_layout)
+        except ValueError as e:
+            self.status_label.configure(text=str(e), text_color="red")
             self.process_button.configure(state="normal", text="选择照片并生成")
             return
-        thread = threading.Thread(target=self.process_after_selection, args=(image_paths, *args))
+        image_paths = filedialog.askopenfilenames(
+            title=f"请选择 {layout.count_hint()}",
+            filetypes=[("Image Files", "*.jpg *.jpeg *.png *.webp *.bmp"), ("All files", "*.*")])
+        if not image_paths:
+            self.status_label.configure(text="已取消选择", text_color="gray")
+            self.process_button.configure(state="normal", text="选择照片并生成")
+            return
+        if not (layout.min_photos <= len(image_paths) <= layout.max_photos):
+            self.status_label.configure(text=f"错误: 需要 {layout.count_hint()}!", text_color="red")
+            self.process_button.configure(state="normal", text="选择照片并生成")
+            return
+        args = (list(image_paths), layout, selected_style, selected_filter, selected_font, selected_content_style)
+        thread = threading.Thread(target=self.process_after_selection, args=args)
         thread.daemon = True
         thread.start()
 
-    def process_after_selection(self, image_paths, selected_layout, selected_style, selected_filter, selected_font,
+    def process_after_selection(self, image_paths, layout, selected_style, selected_filter, selected_font,
                                 selected_content_style):
+        """工作线程：只做纯计算，所有 UI 更新都通过 self.after 投递回主线程。"""
         try:
-            self.status_label.configure(text="图片处理中...")
-            images = [Image.open(p) for p in image_paths]
+            self.after(0, lambda: self.status_label.configure(text="读取照片中...", text_color="gray"))
+            images = [imaging.load_image(p) for p in image_paths]
+            scale = 2.0  # 阶段 4 会提供「清晰度」选项
+            target_w = layout.photo_width(scale)
 
-            # 【核心修正】调整操作顺序：先应用滤镜
-            self.status_label.configure(text="滤镜应用中...")
-            # 1. 先对原始图片应用滤镜
-            filtered_images = [layouts.apply_filter(img, selected_filter) for img in images]
+            self.after(0, lambda: self.status_label.configure(text="滤镜应用中...", text_color="gray"))
+            try:
+                # 先缩放到目标尺寸再套滤镜（避免对超大原图全尺寸计算）
+                filtered = [filters.apply_filter(imaging.resize_to_width(im, target_w), selected_filter)
+                            for im in images]
+            except filters.FilterError as e:
+                logger.warning(f"滤镜不可用，已跳过：{e}")
+                self.after(0, lambda msg=str(e): self.status_label.configure(
+                    text=f"滤镜不可用已跳过：{msg}", text_color="orange"))
+                filtered = [imaging.resize_to_width(im, target_w) for im in images]
 
-            # 将用户的布局选择打包，方便传递
-            layout_params = {'style': selected_style}
+            family = textdraw.family_from_name(selected_font)
+            n = len(images)
 
-            self.status_label.configure(text="正在生成布局...")
-            # 2. 然后用处理过的图片去创建布局
-            if selected_layout == "电影竖排":
-                composed_image = layouts.create_film_strip_layout(filtered_images, style=selected_style)
-            else:  # 单张海报
-                composed_image = layouts.create_poster_layout(filtered_images)
+            # 阶段 3 将改为把 N 张照片分别发给 AI；当前仍用旧接口（发无字成图）
+            self.after(0, lambda: self.status_label.configure(text="正在请求AI生成文字...", text_color="gray"))
+            plain = layout.render(filtered, [""] * n, family, scale=scale, style=selected_style).image
+            ai_texts = ai_connector.get_ai_text(plain, selected_content_style, n)
+            # 旧接口失败时会把报错字符串当文案返回——提前过滤，绝不让报错上图
+            bad_prefixes = ("AI调用失败", "AI未能生成文本", "AI返回了未知格式")
+            if any(str(t).startswith(bad_prefixes) for t in ai_texts):
+                ai_texts = []
+                self.after(0, lambda: self.status_label.configure(text="AI 配文失败，已留空可手动补", text_color="orange"))
+            ai_texts = (list(ai_texts) + [""] * n)[:n]
 
-            self.status_label.configure(text="正在请求AI生成文字...")
-            # 3. 把带边框但不带文字的图发给AI
-            ai_texts = ai_connector.get_ai_text(composed_image, selected_content_style, len(images))
+            self.after(0, lambda: self.status_label.configure(text="正在绘制文字...", text_color="gray"))
+            result = layout.render(filtered, ai_texts, family, scale=scale, style=selected_style)
 
-            self.status_label.configure(text="正在绘制文字...")
-            # 4. 最后在图上绘制文字
-            self.final_image_with_text = layouts.draw_text_on_image(
-                image=composed_image,
-                texts=ai_texts,
-                layout_style=selected_layout,
-                font_name=selected_font,
-                original_images=images,  # 仍然传入最原始的图片用于尺寸计算
-                layout_params=layout_params
-            )
-
-            self.after(0, self.update_status_and_display, self.final_image_with_text)
+            self.after(0, self.update_status_and_display, result.image)
 
         except Exception as e:
-            self.status_label.configure(text=f"发生未知错误: {e}", text_color="red")
+            logger.exception("生成失败")
+            self.after(0, lambda msg=str(e): self.status_label.configure(
+                text=f"发生未知错误: {msg}", text_color="red"))
         finally:
-            self.process_button.configure(state="normal", text="选择照片并生成")
+            self.after(0, lambda: self.process_button.configure(state="normal", text="选择照片并生成"))
 
     def update_status_and_display(self, final_image):
         """更新状态，并让新的画布控件显示图片"""

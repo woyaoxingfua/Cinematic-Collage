@@ -1,238 +1,266 @@
 # file: layouts.py
+"""布局渲染（阶段 2 重写）。
+
+- 所有布局实现 Layout 接口并注册到 LAYOUTS 注册表，新增布局只需注册即可被 UI 使用
+- 所有尺寸都是「基准值 × scale」，不再跨文件手抄魔法数字
+- render() 返回 RenderResult（成图 + 每张照片的 Slot），文字通过 slots 定位
+"""
+from __future__ import annotations
+
 import logging
+from dataclasses import dataclass
 
-import numpy as np
-import colour
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
-import config
+import imaging
+import textdraw
 
 logger = logging.getLogger(__name__)
 
 
-def create_film_strip_layout(images, style="保留间隙"):
-    """
-    【功能确认版】
-    确保胶卷边框和齿孔效果能正确显示。
-    """
-    # --- 1. 定义布局参数 ---
-    image_width = 600
-    sidebar_width = 60
-
-    if style == "保留间隙":
-        gap = 25
-    else:  # "无缝拼接"
-        gap = 0
-
-    hole_size = 12
-    hole_margin = (sidebar_width - hole_size) // 2
-    hole_spacing = hole_size * 2.5
-
-    # --- 2. 准备图片 ---
-    resized_images = []
-    for img in images:
-        ratio = image_width / img.width
-        target_height = int(img.height * ratio)
-        resized_images.append(img.resize((image_width, target_height), Image.Resampling.LANCZOS))
-
-    # --- 3. 创建画布 ---
-    total_image_height = sum(img.height for img in resized_images)
-    total_gap_height = gap * (len(resized_images) - 1)
-    total_height = total_image_height + total_gap_height
-    total_width = sidebar_width + image_width + sidebar_width
-
-    composed_image = Image.new('RGB', (total_width, total_height), 'black')
-
-    # --- 4. 粘贴图片 ---
-    current_y = 0
-    for img in resized_images:
-        composed_image.paste(img, (sidebar_width, current_y))
-        current_y += img.height + gap
-
-    # --- 5. 绘制边孔 ---
-    draw = ImageDraw.Draw(composed_image)
-    hole_color = (25, 25, 25)
-
-    for y in range(int(hole_spacing // 2), total_height, int(hole_spacing)):
-        left_hole_x0 = hole_margin
-        left_hole_y0 = y
-        left_hole_x1 = left_hole_x0 + hole_size
-        left_hole_y1 = y + hole_size
-        draw.rectangle([left_hole_x0, left_hole_y0, left_hole_x1, left_hole_y1], fill=hole_color)
-
-        right_hole_x0 = image_width + sidebar_width + hole_margin
-        right_hole_y0 = y
-        right_hole_x1 = right_hole_x0 + hole_size
-        right_hole_y1 = y + hole_size
-        draw.rectangle([right_hole_x0, right_hole_y0, right_hole_x1, right_hole_y1], fill=hole_color)
-
-    return composed_image
+def _s(base, scale) -> int:
+    """基准值 × scale，四舍五入，至少为 1。"""
+    return max(1, int(round(base * scale)))
 
 
-def create_poster_layout(images):
-    """
-    【最终版 - 参照用户图片】
-    实现非对称的“拍立得/画廊打印”风格，顶部和两侧是窄边，底部是宽边。
-    """
-    # --- 1. 定义画框参数 ---
-    # 非对称边框，顶部和两侧使用一个尺寸，底部使用一个更宽的尺寸
-    side_padding = 50       # 上、左、右三边的边框宽度
-    bottom_padding = 180    # 底部边框的宽度，留出更多空间
-    frame_color = (255, 255, 255) # 纯白色画框
+@dataclass
+class Slot:
+    """一张照片在成图中的位置。"""
 
-    # --- 2. 准备图片 ---
-    image = images[0]
-    # 设定一个最大宽度，防止图片过大
-    max_width = 800
-    if image.width > max_width:
-        ratio = max_width / image.width
-        new_height = int(image.height * ratio)
-        image = image.resize((max_width, new_height), Image.Resampling.LANCZOS)
-    
-    # --- 3. 计算最终画布尺寸 ---
-    # 画布的宽度 = 左边框 + 图片宽度 + 右边框
-    canvas_width = side_padding + image.width + side_padding
-    # 画布的高度 = 上边框 + 图片高度 + 下边框
-    canvas_height = side_padding + image.height + bottom_padding
-    
-    # --- 4. 创建纯白画布并粘贴图片 ---
-    # 这次的逻辑更简单：先创建一块纯白的“相纸”
-    final_image = Image.new('RGB', (canvas_width, canvas_height), frame_color)
-    
-    # 然后，把用户的照片精确地“贴”在相纸的正确位置上
-    # X坐标 = 左边框宽度
-    # Y坐标 = 上边框宽度
-    paste_position = (side_padding, side_padding)
-    final_image.paste(image, paste_position)
-    
-    return final_image
+    x: int
+    y: int
+    w: int
+    h: int
+
+    @property
+    def bottom(self) -> int:
+        return self.y + self.h
+
+    @property
+    def right(self) -> int:
+        return self.x + self.w
 
 
-def apply_filter(image, filter_name):
-    """
-    【再次修正版】
-    使用 'colour-science' 库更稳定的方法来应用LUT滤镜。
-    """
-    if filter_name == "无":
-        return image
+@dataclass
+class RenderResult:
+    """布局渲染结果：成图 + 每张照片的位置（供文字定位与测试校验）。"""
 
+    image: Image.Image
+    slots: list
+
+
+class Layout:
+    """布局基类：子类设置 name / min_photos / max_photos 并实现两个方法。"""
+
+    name = ""
+    min_photos = 1
+    max_photos = 1
+
+    def photo_width(self, scale) -> int:
+        """该布局需要的照片目标宽度（基准值 × scale）。"""
+        raise NotImplementedError
+
+    def render(self, photos, texts, font, scale=1.0, **opts) -> RenderResult:
+        """渲染布局。texts 与 photos 一一对应；font 为 textdraw.FontFamily。"""
+        raise NotImplementedError
+
+    def check_count(self, n) -> None:
+        if not (self.min_photos <= n <= self.max_photos):
+            raise ValueError(f"布局「{self.name}」需要 {self.count_hint()}，实际收到 {n} 张")
+
+    def count_hint(self) -> str:
+        """给用户看的照片数量提示，如「2–6 张照片」。"""
+        if self.min_photos == self.max_photos:
+            return f"{self.min_photos} 张照片"
+        return f"{self.min_photos}–{self.max_photos} 张照片"
+
+
+# 布局注册表：UI 与 pipeline 按名字查找
+LAYOUTS: dict = {}
+
+
+def register(layout: Layout) -> None:
+    LAYOUTS[layout.name] = layout
+
+
+def get(name) -> Layout:
     try:
-        lut_path = config.LUTS_DIR / f"{filter_name}.cube"
-
-        # 1. 使用 colour.io.luts.read_LUT 方法加载LUT (根据项目规范)
-        lut = colour.io.luts.read_LUT(str(lut_path))
-
-        # 2. 将Pillow图片转换为NumPy数组，并确保颜色值在0-1之间
-        image = image.convert("RGB")  # 确保是RGB格式
-        image_array = np.array(image) / 255.0
-
-        # 3. 应用LUT
-        filtered_array = lut.apply(image_array)
-
-        # 4. 将处理后的0-1浮点数数组转换回0-255的整数数组
-        filtered_array_8bit = (np.clip(filtered_array, 0, 1) * 255).astype(np.uint8)
-
-        # 5. 将NumPy数组转换回Pillow图片对象
-        return Image.fromarray(filtered_array_8bit)
-
-    except FileNotFoundError:
-        logger.error(f"错误：找不到滤镜文件 {lut_path}！请检查luts文件夹和文件名。")
-        return image
-    except Exception as e:
-        logger.error(f"应用滤镜时发生错误: {e}")
-        return image
+        return LAYOUTS[name]
+    except KeyError:
+        raise ValueError(f"未知布局：{name}（可用：{'、'.join(LAYOUTS)}）") from None
 
 
-def draw_text_on_image(image, texts, layout_style, font_name, original_images, layout_params):
-    """
-    【终极修正版】
-    修正了单张海报布局的文字Y坐标计算问题。
-    """
-    if not texts:
-        texts = ["未能获取文字"]
+# ===================================================================
+# 电影竖排
+# ===================================================================
+class FilmStripLayout(Layout):
+    """电影竖排：黑色胶卷边框 + 两侧齿孔，2–6 张照片纵向排列。"""
 
-    draw = ImageDraw.Draw(image)
-    font_path = f"fonts/{font_name}" if font_name != "默认" else None
+    name = "电影竖排"
+    min_photos = 2
+    max_photos = 6
 
-    if layout_style == "单张海报":
-        text = texts[0]
-        font_size = 40
-        try:
-            font = ImageFont.truetype(font_path, font_size)
-        except IOError:
-            font = ImageFont.load_default()
+    PHOTO_W = 600  # 照片区宽度（基准）
+    SIDEBAR = 60   # 两侧边条宽度
+    GAP = 25       # 「保留间隙」模式下照片之间的间隙
+    HOLE = 12      # 齿孔边长
+    HOLE_SPACING = 30  # 齿孔纵向间距
+    CANVAS_BG = (10, 10, 10)
+    HOLE_COLOR = (32, 32, 32)
 
-        # 【核心修正】精确计算文字写入位置
-        # 1. 获取原始照片尺寸信息，以便定位照片下边缘
-        side_padding = 50  # 这个值必须和 create_poster_layout 中的一致
-        max_width = 800  # 这个值也必须一致
-        original_photo = original_images[0]
-        if original_photo.width > max_width:
-            ratio = max_width / original_photo.width
-            photo_height = int(original_photo.height * ratio)
+    TEXT_SIZE = 28   # 配文字号上限
+    TEXT_MIN = 14    # 配文字号下限（再小就截断）
+    TEXT_PAD = 20    # 文字距照片边缘
+    TEXT_MAX_H = 120  # 单张照片上文字区最大高度
+
+    def photo_width(self, scale) -> int:
+        return _s(self.PHOTO_W, scale)
+
+    def render(self, photos, texts, font, scale=1.0, style="保留间隙", **_) -> RenderResult:
+        self.check_count(len(photos))
+        n = len(photos)
+        texts = list(texts or [])
+        texts = (texts + [""] * n)[:n]
+
+        pw, sw = _s(self.PHOTO_W, scale), _s(self.SIDEBAR, scale)
+        gap = _s(self.GAP, scale) if style == "保留间隙" else 0
+        hole = max(2, _s(self.HOLE, scale))
+        hole_margin = max(1, (sw - hole) // 2)
+        hole_spacing = max(hole * 2, _s(self.HOLE_SPACING, scale))
+
+        # 统一照片宽度（窄图会被放大到目标宽度，与旧版行为一致）
+        imgs = [imaging.resize_exact_width(im, pw) for im in photos]
+        total_h = sum(im.height for im in imgs) + gap * (n - 1)
+        total_w = sw * 2 + pw
+
+        canvas = Image.new("RGB", (total_w, total_h), self.CANVAS_BG)
+        draw = ImageDraw.Draw(canvas)
+        slots = []
+        pad = _s(self.TEXT_PAD, scale)
+        tmax, tmin = _s(self.TEXT_SIZE, scale), _s(self.TEXT_MIN, scale)
+        tmax_h = _s(self.TEXT_MAX_H, scale)
+
+        y = 0
+        for i, im in enumerate(imgs):
+            canvas.paste(im, (sw, y))
+            slot = Slot(sw, y, pw, im.height)
+            slots.append(slot)
+            self._draw_caption(draw, slot, texts[i], font, pad, tmax, tmin, tmax_h)
+            y += im.height + gap
+
+        # 两侧齿孔
+        yy = hole_spacing // 2
+        while yy + hole <= total_h:
+            draw.rectangle([hole_margin, yy, hole_margin + hole, yy + hole], fill=self.HOLE_COLOR)
+            draw.rectangle(
+                [total_w - hole_margin - hole, yy, total_w - hole_margin, yy + hole],
+                fill=self.HOLE_COLOR,
+            )
+            yy += hole_spacing
+
+        return RenderResult(canvas, slots)
+
+    def _draw_caption(self, draw, slot: Slot, text, font, pad, tmax, tmin, tmax_h) -> None:
+        """在单张照片底部绘制白字黑描边的配文（fit_text 自适应字号）。"""
+        text = (text or "").strip()
+        if not text:
+            return
+        box_w = slot.w - pad * 2
+        box_h = min(tmax_h, slot.h - pad)
+        if box_w <= tmin or box_h < tmin:
+            return  # 照片太矮，放不下文字
+        lines, size = textdraw.fit_text(text, box_w, box_h, tmax, tmin, font)
+        if not lines:
+            return
+        f = font.at(size)
+        line_h = font.measure_line_height(f)
+        block_h = len(lines) * line_h
+        y0 = slot.bottom - pad - block_h
+        textdraw.draw_lines(
+            draw,
+            lines,
+            slot.x + pad,
+            y0,
+            f,
+            (240, 240, 240),
+            line_h=line_h,
+            stroke_width=max(1, size // 14),
+            stroke_fill=(0, 0, 0),
+        )
+
+
+# ===================================================================
+# 单张海报
+# ===================================================================
+class PosterLayout(Layout):
+    """单张海报：非对称「拍立得 / 画廊打印」风格，白边 + 底部宽留白放文字。"""
+
+    name = "单张海报"
+    min_photos = 1
+    max_photos = 1
+
+    MAX_W = 800       # 照片最大宽度（基准；只缩不放）
+    SIDE = 50         # 上 / 左 / 右边框宽度
+    MIN_BOTTOM = 180  # 底部留白最小值
+    TEXT_GAP = 40     # 文字与照片、文字与画布底边的边距
+    TEXT_CAP = 400    # 文字区高度上限（基准，防超长文字撑爆画布）
+    TEXT_SIZE = 40
+    TEXT_MIN = 18
+    FRAME = (255, 255, 255)
+    TEXT_COLOR = (50, 50, 50)
+
+    def photo_width(self, scale) -> int:
+        return _s(self.MAX_W, scale)
+
+    def render(self, photos, texts, font, scale=1.0, **_) -> RenderResult:
+        self.check_count(len(photos))
+        text = ""
+        if texts:
+            text = (texts[0] or "").strip()
+
+        max_w, side = _s(self.MAX_W, scale), _s(self.SIDE, scale)
+        min_bottom = _s(self.MIN_BOTTOM, scale)
+        gap = _s(self.TEXT_GAP, scale)
+
+        im = imaging.resize_to_width(photos[0], max_w)  # 只缩不放
+        canvas_w = side * 2 + im.width
+        box_w = im.width  # 文字区宽度与照片同宽
+
+        # 先排好文字，再定画布高度
+        lines, size = [], 0
+        if text:
+            cap = max(min_bottom * 2, _s(self.TEXT_CAP, scale))
+            lines, size = textdraw.fit_text(
+                text, box_w, cap, _s(self.TEXT_SIZE, scale), _s(self.TEXT_MIN, scale), font
+            )
+        block_h = 0.0
+        f = None
+        line_h = 0.0
+        if lines:
+            f = font.at(size)
+            line_h = font.measure_line_height(f)
+            block_h = len(lines) * line_h
+
+        # 底部留白 = max(最小值, 文字高度 + 上下边距)
+        if lines:
+            bottom = max(min_bottom, int(round(block_h)) + gap * 2)
         else:
-            photo_height = original_photo.height
+            bottom = min_bottom
+        canvas_h = side + im.height + bottom
 
-        # 2. 计算文字区域和起始Y坐标
-        # 文字区域的顶部，在照片下边缘再往下一点
-        text_area_top_y = side_padding + photo_height + 40  # 40是照片与文字的间距
-
-        text_area_width = image.width - (side_padding * 2)
-        wrapped_lines = wrap_text(draw, text, text_area_width, font)
-
-        # 3. 逐行绘制
-        current_y = text_area_top_y
-        for line in wrapped_lines:
-            line_bbox = draw.textbbox((0, 0), line, font=font)
-            line_width = line_bbox[2] - line_bbox[0]
-            line_x = (image.width - line_width) / 2  # 水平居中
-            draw.text((line_x, current_y), line, font=font, fill=(50, 50, 50))
-            current_y += font_size * 1.2  # 1.2倍行距
-
-    elif layout_style == "电影竖排":
-        # ... (这部分逻辑保持不变) ...
-        font_size = 28
-        try:
-            font = ImageFont.truetype(font_path, font_size)
-        except IOError:
-            font = ImageFont.load_default()
-        params = {"image_width": 600, "sidebar_width": 60, "gap": 25 if layout_params.get('style') == "保留间隙" else 0}
-        current_y = 0
-        for i, original_img in enumerate(original_images):
-            ratio = params["image_width"] / original_img.width
-            img_height = int(original_img.height * ratio)
-            text = texts[i] if i < len(texts) else ""
-            text_area_width = params["image_width"] - 40
-            wrapped_lines = wrap_text(draw, text, text_area_width, font)
-            total_text_height = len(wrapped_lines) * font_size
-            start_y = current_y + img_height - total_text_height - 20
-            for line in wrapped_lines:
-                line_x = params["sidebar_width"] + 20
-                draw.text((line_x, start_y), line, font=font, fill=(240, 240, 240), stroke_width=1,
-                          stroke_fill=(0, 0, 0))
-                start_y += font_size
-            current_y += img_height + params["gap"]
-
-    return image
+        canvas = Image.new("RGB", (canvas_w, canvas_h), self.FRAME)
+        canvas.paste(im, (side, side))
+        if lines:
+            # 文字在底部留白里垂直居中、水平居中
+            y0 = side + im.height + (bottom - block_h) / 2
+            draw = ImageDraw.Draw(canvas)
+            textdraw.draw_lines(
+                draw, lines, side, y0, f, self.TEXT_COLOR,
+                line_h=line_h, align="center", max_width=box_w,
+            )
+        return RenderResult(canvas, [Slot(side, side, im.width, im.height)])
 
 
-def wrap_text(draw, text, width, font):
-    """
-    【中文优化版】
-    一个辅助函数，用于将长文本（包括中文）换行。
-    """
-    lines = []
-    if not text:
-        return lines
-
-    current_line = ""
-    for char in text:
-        # 检查加上新字符后是否会超宽
-        if draw.textbbox((0, 0), current_line + char, font=font)[2] <= width:
-            current_line += char
-        else:
-            lines.append(current_line)
-            current_line = char
-    lines.append(current_line)
-
-    return lines
+# 注册全部布局（新增布局在这里 register 即可）
+register(FilmStripLayout())
+register(PosterLayout())

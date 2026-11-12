@@ -41,3 +41,30 @@
 ### 保守决策记录
 - 日志文件不可写时 `setup_logging` 仅输出控制台（不因日志失败拖垮启动）
 - `app_ui.py` 里重复定义的 `on_resize` 留待阶段 4 整体重写时删除（本阶段不做无关格式化/顺手改）
+
+---
+
+## 阶段 2：图像管线（核心）—— 完成
+
+- [x] `imaging.py` 新建：`load_image()`（EXIF 转正 / RGBA/P 带透明铺白底 / CMYK 等统一 RGB / 长边 >3000 先缩小）；`resize_to_width`（只缩不放）、`resize_exact_width`（统一宽度）、`crop_to_fill`、`crop_to_aspect`
+- [x] `filters.py` 新建：.cube 解析 + numpy 三线性插值；按路径缓存只读一次；缺失/损坏抛 `FilterError`（中文）由上层提示并跳过；分带处理限制内存峰值
+- [x] `layouts.py` 按新接口重写：`Slot` / `RenderResult` / `Layout` 基类 + `LAYOUTS` 注册表
+  - 电影竖排：2–6 张，「保留间隙 / 无缝拼接」，齿孔边条随 scale 缩放
+  - 单张海报：先排文字再定画布高度，底部留白 = max(180×s, 文字高 + 2×40×s)，文字在留白内垂直+水平居中
+  - 所有尺寸 = 基准值 × scale；预设 1×/2×/3×（电影竖排 2× 总宽 1440px，海报 2× 约 1800px）
+- [x] `textdraw.py` 新建：字体解析链（系统中文 → 仓库手写体.ttf → load_default，修掉 truetype(None) 崩溃）；中英混合换行（中文按字、英文按词、避头标点、`font.getlength` 测宽）；`fit_text` 逐步缩字号 + 省略号截断；`draw_lines` 绘制
+- [x] `app_ui.py` 最小适配（阶段 4 才整体重写）：生成流程改走 imaging/filters/layouts/textdraw；电影竖排接受 2–6 张；文件类型加 webp/bmp；AI 旧接口的报错字符串提前过滤，绝不上图；工作线程 UI 更新全部经 `self.after` 投递
+- [x] `tools/make_samples.py`：9 张样图输出到 `samples/`
+- [x] 测试 31 个新增（imaging 9 / textdraw 10 / filters 9 / layouts 12 + 对拍 2）
+
+### 重要发现与修复（colour 对拍）
+- ColdChrome.cube 的表含**超界值**（负值 / >1）。colour 保留原值参与插值、仅输出时截断；我最初在解析时 clip 表导致内插偏差最大 7 个色阶。修正为「表不 clip、输出才 clip」后，三个仓库 LUT + identity 对拍全部达标（平均 <1、最大 <3 个色阶）→ **numpy 实现保留，colour-science 可在阶段 5 从必装依赖移除**（对拍测试保留，colour 缺失时自动跳过）
+- fit_text 截断分支曾漏加省略号（丢弃内容时最后一行必须补 …），已修
+
+### 验收结果
+- `pytest`：44 passed（含对拍）
+- `python main.py --smoke-test` 退出码 0
+- `tools/make_samples.py` 生成 9 张样图；visual-judge 视觉验收 4/4 通过（齿孔对称、配文不越界不压间隙、海报文字居中留白充足、滤镜观感正常）
+
+### 样图路径（供早上目检）
+`samples/`：film_strip_gap_{1x,2x,3x}.png、film_strip_seamless_2x.png、film_strip_5photos_2x.png、film_strip_filtered_BlueArchitecture_2x.png、poster_{long_text,english,no_text}_2x.png
