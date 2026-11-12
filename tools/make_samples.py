@@ -76,6 +76,11 @@ def main():
     r = strip.render(photos5, texts5, family, scale=2.0, style="保留间隙")
     save(r.image, "film_strip_5photos_2x.png")
 
+    # 四宫格
+    photos4 = photos3 + [make_photo(700, 700, 3)]
+    r = layouts.get("四宫格").render(photos4, TEXTS_3 + ["第四张的独白"], family, scale=2.0)
+    save(r.image, "grid4_2x.png")
+
     # 单张海报（长文案 / 短文案 / 空文案）
     r = poster.render([make_photo(1200, 900, 5)], [TEXT_LONG], family, scale=2.0)
     save(r.image, "poster_long_text_2x.png")

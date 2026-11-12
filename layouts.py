@@ -91,6 +91,38 @@ def get(name) -> Layout:
 
 
 # ===================================================================
+# 共用文字绘制
+# ===================================================================
+def _draw_caption_bottom(draw, slot: Slot, text, font, pad, tmax, tmin, tmax_h) -> None:
+    """在照片底部绘制白字黑描边的配文（fit_text 自适应字号），供各布局复用。"""
+    text = (text or "").strip()
+    if not text:
+        return
+    box_w = slot.w - pad * 2
+    box_h = min(tmax_h, slot.h - pad)
+    if box_w <= tmin or box_h < tmin:
+        return  # 照片太小，放不下文字
+    lines, size = textdraw.fit_text(text, box_w, box_h, tmax, tmin, font)
+    if not lines:
+        return
+    f = font.at(size)
+    line_h = font.measure_line_height(f)
+    block_h = len(lines) * line_h
+    y0 = slot.bottom - pad - block_h
+    textdraw.draw_lines(
+        draw,
+        lines,
+        slot.x + pad,
+        y0,
+        f,
+        (240, 240, 240),
+        line_h=line_h,
+        stroke_width=max(1, size // 14),
+        stroke_fill=(0, 0, 0),
+    )
+
+
+# ===================================================================
 # 电影竖排
 # ===================================================================
 class FilmStripLayout(Layout):
@@ -145,7 +177,7 @@ class FilmStripLayout(Layout):
             canvas.paste(im, (sw, y))
             slot = Slot(sw, y, pw, im.height)
             slots.append(slot)
-            self._draw_caption(draw, slot, texts[i], font, pad, tmax, tmin, tmax_h)
+            _draw_caption_bottom(draw, slot, texts[i], font, pad, tmax, tmin, tmax_h)
             y += im.height + gap
 
         # 两侧齿孔
@@ -160,33 +192,59 @@ class FilmStripLayout(Layout):
 
         return RenderResult(canvas, slots)
 
-    def _draw_caption(self, draw, slot: Slot, text, font, pad, tmax, tmin, tmax_h) -> None:
-        """在单张照片底部绘制白字黑描边的配文（fit_text 自适应字号）。"""
-        text = (text or "").strip()
-        if not text:
-            return
-        box_w = slot.w - pad * 2
-        box_h = min(tmax_h, slot.h - pad)
-        if box_w <= tmin or box_h < tmin:
-            return  # 照片太矮，放不下文字
-        lines, size = textdraw.fit_text(text, box_w, box_h, tmax, tmin, font)
-        if not lines:
-            return
-        f = font.at(size)
-        line_h = font.measure_line_height(f)
-        block_h = len(lines) * line_h
-        y0 = slot.bottom - pad - block_h
-        textdraw.draw_lines(
-            draw,
-            lines,
-            slot.x + pad,
-            y0,
-            f,
-            (240, 240, 240),
-            line_h=line_h,
-            stroke_width=max(1, size // 14),
-            stroke_fill=(0, 0, 0),
+# ===================================================================
+# 四宫格
+# ===================================================================
+class Grid4Layout(Layout):
+    """四宫格：2×2 网格，照片居中裁切铺满格子，每格底部配文。"""
+
+    name = "四宫格"
+    min_photos = 4
+    max_photos = 4
+
+    CELL_W = 600   # 单格宽度（基准）
+    CELL_H = 450   # 单格高度（基准，4:3）
+    GAP = 25       # 格子间距
+    MARGIN = 25    # 画布外边距
+    BG = (15, 15, 15)
+    TEXT_SIZE = 26
+    TEXT_MIN = 13
+    TEXT_PAD = 18
+    TEXT_MAX_H = 100
+
+    def photo_width(self, scale) -> int:
+        return _s(self.CELL_W, scale)
+
+    def render(self, photos, texts, font, scale=1.0, **_) -> RenderResult:
+        self.check_count(len(photos))
+        texts = (list(texts or []) + [""] * 4)[:4]
+        cw, ch = _s(self.CELL_W, scale), _s(self.CELL_H, scale)
+        gap, margin = _s(self.GAP, scale), _s(self.MARGIN, scale)
+
+        canvas = Image.new(
+            "RGB",
+            (margin * 2 + cw * 2 + gap, margin * 2 + ch * 2 + gap),
+            self.BG,
         )
+        draw = ImageDraw.Draw(canvas)
+        pad = _s(self.TEXT_PAD, scale)
+        tmax, tmin = _s(self.TEXT_SIZE, scale), _s(self.TEXT_MIN, scale)
+        tmax_h = _s(self.TEXT_MAX_H, scale)
+
+        slots = []
+        origins = [
+            (margin, margin),
+            (margin + cw + gap, margin),
+            (margin, margin + ch + gap),
+            (margin + cw + gap, margin + ch + gap),
+        ]
+        for i, (x, y) in enumerate(origins):
+            im = imaging.crop_to_fill(photos[i], cw, ch)  # 居中裁切铺满格子
+            canvas.paste(im, (x, y))
+            slot = Slot(x, y, cw, ch)
+            slots.append(slot)
+            _draw_caption_bottom(draw, slot, texts[i], font, pad, tmax, tmin, tmax_h)
+        return RenderResult(canvas, slots)
 
 
 # ===================================================================
@@ -264,3 +322,4 @@ class PosterLayout(Layout):
 # 注册全部布局（新增布局在这里 register 即可）
 register(FilmStripLayout())
 register(PosterLayout())
+register(Grid4Layout())
