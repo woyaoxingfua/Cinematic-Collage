@@ -43,7 +43,7 @@ class ImageCanvas(ctk.CTkFrame):
 
     ZOOM_MIN = 0.05
     ZOOM_MAX = 8.0
-    FIT_MARGIN = 40
+    FIT_MARGIN = 60  # 适应窗口时四周留白（高 DPI 屏上太紧会显得贴边）
 
     def __init__(self, master):
         super().__init__(master)
@@ -186,8 +186,10 @@ class PhotoBoothApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("电影感照片生成器 V3.0")
-        self.geometry("1280x860")
-        self.minsize(980, 640)
+        # 默认高度需容纳左侧控制面板全部内容（在 125%/150% DPI 缩放屏幕上
+        # 面板内容会被等比放大，860 高度不够会把按钮挤出可视区）
+        self.geometry("1280x980")
+        self.minsize(1000, 760)
 
         self.settings = config.load_settings()
         self._ai_ready = config.load_config().is_ready
@@ -204,6 +206,7 @@ class PhotoBoothApp(ctk.CTk):
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=0)  # 底部状态栏
         self._build_controls()
 
         self.image_canvas = ImageCanvas(self)
@@ -227,20 +230,20 @@ class PhotoBoothApp(ctk.CTk):
 
     def _build_controls(self):
         panel = ctk.CTkScrollableFrame(master=self, width=330)
-        panel.grid(row=0, column=0, padx=(10, 0), pady=10, sticky="nsw")
+        panel.grid(row=0, column=0, padx=(10, 0), pady=(10, 0), sticky="nsw")
         panel.grid_columnconfigure(0, weight=1)
         self.panel = panel
         r = 0
 
         # 1. 开始创作
         ctk.CTkLabel(panel, text="1. 选择照片并生成").grid(
-            row=r, column=0, sticky="w", padx=12, pady=(10, 2)); r += 1
+            row=r, column=0, sticky="w", padx=12, pady=(8, 2)); r += 1
         self.generate_button = ctk.CTkButton(panel, text="选择照片并生成", command=self.on_generate)
         self.generate_button.grid(row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
 
         # 2. 排版风格
         ctk.CTkLabel(panel, text="2. 排版风格").grid(
-            row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
+            row=r, column=0, sticky="w", padx=12, pady=(8, 2)); r += 1
         self.layout_var = StringVar(value="电影竖排")
         self.layout_menu = ctk.CTkOptionMenu(
             panel, values=list(layouts.LAYOUTS), variable=self.layout_var,
@@ -277,7 +280,7 @@ class PhotoBoothApp(ctk.CTk):
 
         # 3. 电影滤镜
         ctk.CTkLabel(panel, text="3. 电影滤镜").grid(
-            row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
+            row=r, column=0, sticky="w", padx=12, pady=(8, 2)); r += 1
         self.filter_var = StringVar(value="无")
         ctk.CTkOptionMenu(panel, values=["无"] + filters.available_filters(),
                           variable=self.filter_var).grid(
@@ -285,12 +288,12 @@ class PhotoBoothApp(ctk.CTk):
 
         # 4. 字体与文字风格
         ctk.CTkLabel(panel, text="4. 字体").grid(
-            row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
+            row=r, column=0, sticky="w", padx=12, pady=(8, 2)); r += 1
         self.font_var = StringVar(value="默认")
         ctk.CTkOptionMenu(panel, values=self._font_names(), variable=self.font_var).grid(
             row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
         ctk.CTkLabel(panel, text="5. 文字风格（AI 生成的内容风格）").grid(
-            row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
+            row=r, column=0, sticky="w", padx=12, pady=(8, 2)); r += 1
         self.content_var = StringVar(value="简体短句")
         ctk.CTkOptionMenu(panel, values=CONTENT_STYLES, variable=self.content_var).grid(
             row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
@@ -302,7 +305,7 @@ class PhotoBoothApp(ctk.CTk):
 
         # 6. 清晰度
         ctk.CTkLabel(panel, text="6. 清晰度").grid(
-            row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
+            row=r, column=0, sticky="w", padx=12, pady=(8, 2)); r += 1
         self.scale_var = StringVar(value="高清 2×")
         ctk.CTkOptionMenu(panel, values=list(SCALE_OPTIONS), variable=self.scale_var).grid(
             row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
@@ -311,7 +314,7 @@ class PhotoBoothApp(ctk.CTk):
         self.ai_switch = ctk.CTkSwitch(
             panel, text="AI 配文（关闭则手动写字）",
             onvalue=True, offvalue=False, command=self._on_ai_toggle)
-        self.ai_switch.grid(row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
+        self.ai_switch.grid(row=r, column=0, sticky="w", padx=12, pady=(8, 2)); r += 1
         if not self._ai_ready:
             self.ai_switch.deselect()
             self.ai_switch.configure(state="disabled")
@@ -320,13 +323,7 @@ class PhotoBoothApp(ctk.CTk):
                 text_color="orange", wraplength=290, justify="left",
             ).grid(row=r, column=0, sticky="w", padx=12, pady=(0, 4)); r += 1
 
-        # 配文输入区（生成后出现 N 个输入框）
-        ctk.CTkLabel(panel, text="配文（生成后可在此手动修改）").grid(
-            row=r, column=0, sticky="w", padx=12, pady=(12, 2)); r += 1
-        self.texts_frame = ctk.CTkFrame(panel, fg_color="transparent")
-        self.texts_frame.grid(row=r, column=0, sticky="ew", padx=8, pady=(0, 4)); r += 1
-
-        # 操作按钮
+        # 操作按钮（放在配文输入框之前，保证小屏幕上也始终可见）
         self.rerender_button = ctk.CTkButton(
             panel, text="重新渲染（不调用 AI）", command=self.on_rerender, state="disabled")
         self.rerender_button.grid(row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
@@ -337,15 +334,20 @@ class PhotoBoothApp(ctk.CTk):
             panel, text="保存图片", command=self.on_save, state="disabled")
         self.save_button.grid(row=r, column=0, sticky="ew", padx=12, pady=2); r += 1
 
-        # 进度条（不定长；仅忙时显示）
-        self.progress = ctk.CTkProgressBar(panel, mode="indeterminate")
-        self.progress.grid(row=r, column=0, sticky="ew", padx=12, pady=(8, 2)); r += 1
-        self.progress.grid_remove()
-        self.progress.set(0)
+        # 配文输入区（生成后出现 N 个输入框；照片多时可滚动）
+        ctk.CTkLabel(panel, text="配文（生成后可在此手动修改）").grid(
+            row=r, column=0, sticky="w", padx=12, pady=(8, 2)); r += 1
+        self.texts_frame = ctk.CTkFrame(panel, fg_color="transparent")
+        self.texts_frame.grid(row=r, column=0, sticky="ew", padx=8, pady=(0, 10)); r += 1
 
-        self.status_label = ctk.CTkLabel(panel, text="一切就绪，请开始创作", wraplength=290,
-                                         justify="left")
-        self.status_label.grid(row=r, column=0, sticky="w", padx=12, pady=(6, 12)); r += 1
+        # 底部状态栏（固定在窗口最下方，不随左侧面板滚动）
+        bottom = ctk.CTkFrame(master=self)
+        bottom.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
+        self.progress = ctk.CTkProgressBar(bottom, mode="indeterminate")
+        self.progress.set(0)  # 不显示；仅忙时 pack
+        self.status_label = ctk.CTkLabel(bottom, text="一切就绪，请开始创作",
+                                         anchor="w", justify="left", wraplength=1000)
+        self.status_label.pack(side="left", fill="x", expand=True, padx=12, pady=(6, 8))
 
     def _on_layout_changed(self, value=None):
         value = value or self.layout_var.get()
@@ -405,13 +407,13 @@ class PhotoBoothApp(ctk.CTk):
         self._busy = busy
         if busy:
             self.generate_button.configure(state="disabled", text="生成中...")
-            self.progress.grid()
+            self.progress.pack(fill="x", padx=12, pady=(8, 0))
             self.progress.start()
             self.status_label.configure(text=message, text_color="gray")
         else:
             self.generate_button.configure(state="normal", text="选择照片并生成")
             self.progress.stop()
-            self.progress.grid_remove()
+            self.progress.pack_forget()
         self._update_action_buttons()
 
     # ------------------------------------------------------------------

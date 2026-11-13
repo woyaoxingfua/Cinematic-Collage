@@ -1,7 +1,5 @@
 # AI电影感拼图工具 (AI Cinematic Collage Tool) V3.0
 
-[English](./README_EN.md) | 简体中文
-
 一个桌面应用程序，它结合多种照片布局、电影感滤镜和 AI 赋文功能，能将您的普通照片一键转化为富有故事性和艺术感的电影风格图片。
 
 ![应用截图](img.png)
@@ -86,7 +84,8 @@ PhotoMagic/
 ├── requirements.txt      # 运行依赖
 ├── requirements-dev.txt  # 开发依赖（pytest）
 ├── build_exe.md          # PyInstaller 打包说明（未验证）
-└── REFACTOR_LOG.md       # v3 重构日志
+├── REFACTOR_LOG.md       # v3 重构日志（含各阶段决策与验收记录）
+└── REFACTOR_PLAN.md      # v3 重构方案原文
 ```
 
 ---
